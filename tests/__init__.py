@@ -1,0 +1,3 @@
+"""
+Тесты для GigaAM Transcriber.
+"""

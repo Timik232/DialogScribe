@@ -1,0 +1,6 @@
+# Diarization dependencies
+# Requires HuggingFace token with access to pyannote models
+
+pyannote.audio>=3.1.0
+speechbrain>=1.0.0
+scikit-learn>=1.3.0
