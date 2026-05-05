@@ -79,6 +79,25 @@ class DiarizationManager:
                 "Установите: pip install pyannote.audio"
             )
         
+        try:
+            import torch.serialization
+            from torch.torch_version import TorchVersion
+            safe_globals_to_add = [TorchVersion]
+            try:
+                from pyannote.audio.core.task import (
+                    Specifications, Problem, Task, Resolution, Scope,
+                    UnknownSpecificationsError,
+                )
+                safe_globals_to_add.extend([
+                    Specifications, Problem, Task, Resolution, Scope,
+                    UnknownSpecificationsError,
+                ])
+            except ImportError:
+                pass
+            torch.serialization.add_safe_globals(safe_globals_to_add)
+        except (ImportError, AttributeError):
+            pass
+        
         # Устанавливаем токен для huggingface_hub
         try:
             from huggingface_hub import login
@@ -96,6 +115,7 @@ class DiarizationManager:
         
         last_error = None
         
+        pipeline = None
         for model_id in models_to_try:
             try:
                 logger.info(f"Попытка загрузки модели: {model_id}")
@@ -105,16 +125,22 @@ class DiarizationManager:
                         model_id,
                         token=self.hf_token
                     )
-                    logger.info(f"Модель {model_id} загружена успешно")
-                    break
                 except TypeError:
                     # Fallback для старых версий
                     pipeline = Pipeline.from_pretrained(
                         model_id,
                         use_auth_token=self.hf_token
                     )
+                
+                if pipeline is not None:
                     logger.info(f"Модель {model_id} загружена успешно")
                     break
+                else:
+                    logger.warning(
+                        f"Модель {model_id} вернула None. "
+                        f"Возможно, не принято соглашение на HuggingFace или токен недействителен."
+                    )
+                    continue
             except Exception as e:
                 last_error = e
                 error_str = str(e)
@@ -154,6 +180,18 @@ class DiarizationManager:
                     )
             else:
                 raise DiarizationError("Не удалось загрузить модель диаризации")
+        
+        # Проверяем, что pipeline загрузился
+        if pipeline is None:
+            raise DiarizationError(
+                "Не удалось загрузить модель диаризации. "
+                "Проверьте:\n"
+                "1. HF_TOKEN действителен\n"
+                "2. Приняты условия использования на HuggingFace:\n"
+                "   - https://huggingface.co/pyannote/speaker-diarization-3.1\n"
+                "   - https://huggingface.co/pyannote/segmentation-3.0\n"
+                "3. Токен имеет права 'read'"
+            )
         
         # Перемещение на устройство
         device = torch.device(self.device)
@@ -202,14 +240,26 @@ class DiarizationManager:
                 warnings.simplefilter("ignore")
                 diarization = self.pipeline(str(audio_path), **kwargs)
             
-            # Преобразование результатов (pyannote.audio 4.0+ API)
+            # Преобразование результатов
             segments = []
-            for turn, speaker in diarization.speaker_diarization:
-                segments.append(SpeakerSegment(
-                    start=turn.start,
-                    end=turn.end,
-                    speaker=speaker
-                ))
+            if hasattr(diarization, 'itertracks'):
+                # pyannote.audio 3.x API (Annotation object)
+                for turn, _, speaker in diarization.itertracks(yield_label=True):
+                    segments.append(SpeakerSegment(
+                        start=turn.start,
+                        end=turn.end,
+                        speaker=speaker
+                    ))
+            elif hasattr(diarization, 'speaker_diarization'):
+                # pyannote.audio 4.0+ API
+                for turn, speaker in diarization.speaker_diarization:
+                    segments.append(SpeakerSegment(
+                        start=turn.start,
+                        end=turn.end,
+                        speaker=speaker
+                    ))
+            else:
+                logger.warning("Неизвестный формат результата диаризации: %s", type(diarization))
             
             # Сортировка по времени
             segments.sort(key=lambda s: s.start)
@@ -343,6 +393,9 @@ class HybridDiarization:
             num_clusters: Ожидаемое количество спикеров
         """
         self.hf_token = hf_token or os.getenv("HF_TOKEN")
+        if device == "auto":
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
         self.num_clusters = num_clusters
         

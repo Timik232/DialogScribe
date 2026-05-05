@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Literal, Optional
 import json
 
 
-OutputFormat = Literal["txt", "json", "srt", "vtt"]
+OutputFormat = Literal["txt", "json", "srt", "vtt", "docx", "pdf"]
 DiarizationMode = Literal["none", "pyannote", "hybrid"]
 
 
@@ -143,7 +143,7 @@ class TranscriptionResult:
     processing_time: float
     metadata: Dict[str, Any] = field(default_factory=dict)
     
-    def to_txt(self, include_timestamps: bool = True, include_speakers: bool = True) -> str:
+    def to_txt(self, include_timestamps: bool = True, include_speakers: bool = True, speaker_names: Dict[str, str] | None = None) -> str:
         """
         Форматирование в текстовый формат.
         
@@ -157,8 +157,9 @@ class TranscriptionResult:
             if include_speakers and any(s.speaker for s in self.segments):
                 lines = []
                 for seg in self.segments:
-                    if seg.speaker:
-                        lines.append(f"{seg.speaker}: {seg.text}")
+                    spk = speaker_names.get(seg.speaker, seg.speaker) if (speaker_names and seg.speaker) else seg.speaker
+                    if spk:
+                        lines.append(f"{spk}: {seg.text}")
                     else:
                         lines.append(seg.text)
                 return "\n".join(lines)
@@ -169,8 +170,9 @@ class TranscriptionResult:
             start_str = _format_time_txt(seg.start)
             end_str = _format_time_txt(seg.end)
             
-            if include_speakers and seg.speaker:
-                lines.append(f"[{start_str} - {end_str}] {seg.speaker}: {seg.text}")
+            spk = speaker_names.get(seg.speaker, seg.speaker) if (speaker_names and seg.speaker) else seg.speaker
+            if include_speakers and spk:
+                lines.append(f"[{start_str} - {end_str}] {spk}: {seg.text}")
             else:
                 lines.append(f"[{start_str} - {end_str}]: {seg.text}")
         
@@ -195,7 +197,7 @@ class TranscriptionResult:
         }
         return json.dumps(data, ensure_ascii=False, indent=indent)
     
-    def to_srt(self) -> str:
+    def to_srt(self, speaker_names: Dict[str, str] | None = None) -> str:
         """
         Форматирование в SRT (SubRip) формат субтитров.
         
@@ -209,9 +211,10 @@ class TranscriptionResult:
             start_str = _format_time_srt(seg.start)
             end_str = _format_time_srt(seg.end)
             
+            spk = speaker_names.get(seg.speaker, seg.speaker) if (speaker_names and seg.speaker) else seg.speaker
             text = seg.text
-            if seg.speaker:
-                text = f"[{seg.speaker}] {text}"
+            if spk:
+                text = f"[{spk}] {text}"
             
             lines.append(str(i))
             lines.append(f"{start_str} --> {end_str}")
@@ -220,7 +223,7 @@ class TranscriptionResult:
         
         return "\n".join(lines)
     
-    def to_vtt(self) -> str:
+    def to_vtt(self, speaker_names: Dict[str, str] | None = None) -> str:
         """
         Форматирование в WebVTT формат субтитров.
         
@@ -236,9 +239,10 @@ class TranscriptionResult:
             start_str = _format_time_vtt(seg.start)
             end_str = _format_time_vtt(seg.end)
             
+            spk = speaker_names.get(seg.speaker, seg.speaker) if (speaker_names and seg.speaker) else seg.speaker
             text = seg.text
-            if seg.speaker:
-                text = f"[{seg.speaker}] {text}"
+            if spk:
+                text = f"[{spk}] {text}"
             
             lines.append(f"{start_str} --> {end_str}")
             lines.append(text)
@@ -272,11 +276,21 @@ class TranscriptionResult:
                 ".json": "json", 
                 ".srt": "srt",
                 ".vtt": "vtt",
+                ".docx": "docx",
+                ".pdf": "pdf",
             }
             format = format_map.get(ext, "txt")
         
         # Генерация контента
-        if format == "json":
+        if format == "docx":
+            from gigaam_transcriber.exporters import export_docx_transcription
+            path.parent.mkdir(parents=True, exist_ok=True)
+            return Path(export_docx_transcription(self, str(path)))
+        elif format == "pdf":
+            from gigaam_transcriber.exporters import export_pdf_transcription
+            path.parent.mkdir(parents=True, exist_ok=True)
+            return Path(export_pdf_transcription(self, str(path)))
+        elif format == "json":
             content = self.to_json()
         elif format == "srt":
             content = self.to_srt()

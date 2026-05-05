@@ -34,6 +34,9 @@ class MergeConfig:
     
     # Объединять ли очень короткие сегменты с соседними
     merge_short_segments: bool = True
+    
+    # Минимальная длительность сегмента для предтранскрипционного объединения (секунды)
+    min_presplit_duration: float = 1.0
 
 
 class SegmentMerger:
@@ -289,6 +292,87 @@ class SegmentMerger:
             merged.append(current)
         
         return merged
+    
+    def merge_short_speaker_segments(
+        self,
+        segments: List[SpeakerSegment],
+        min_duration: Optional[float] = None,
+    ) -> List[SpeakerSegment]:
+        """
+        Объединение коротких сегментов диаризации с соседними того же спикера.
+        
+        Выполняется ДО транскрипции, чтобы предотвратить галлюцинации ASR
+        на коротких аудиофрагментах.
+        
+        Args:
+            segments: Сегменты диаризации
+            min_duration: Минимальная длительность сегмента (секунды)
+            
+        Returns:
+            Список сегментов с объединёнными короткими фрагментами
+        """
+        if not segments:
+            return []
+        
+        if len(segments) < 2:
+            return segments
+        
+        min_duration = min_duration if min_duration is not None else self.config.min_presplit_duration
+        sorted_segments = sorted(segments, key=lambda s: s.start)
+        
+        result: List[SpeakerSegment] = []
+        i = 0
+        
+        while i < len(sorted_segments):
+            current = sorted_segments[i]
+            prev_in_result = result[-1] if result else None
+            next_in_input = sorted_segments[i + 1] if i + 1 < len(sorted_segments) else None
+
+            if current.duration >= min_duration:
+                # Длинный сегмент: поглощаем предыдущий короткий того же спикера
+                if (prev_in_result is not None
+                        and prev_in_result.speaker == current.speaker
+                        and prev_in_result.duration < min_duration):
+                    merged_dur = current.end - prev_in_result.start
+                    if merged_dur <= self.config.max_merged_duration:
+                        prev_in_result.end = current.end
+                        i += 1
+                        continue
+                result.append(current)
+                i += 1
+                continue
+
+            # Короткий сегмент — пытаемся объединить с соседом того же спикера
+            merged_with_prev = False
+            merged_with_next = False
+
+            if (prev_in_result is not None
+                    and prev_in_result.speaker == current.speaker):
+                merged_dur = current.end - prev_in_result.start
+                if merged_dur <= self.config.max_merged_duration:
+                    prev_in_result.end = current.end
+                    merged_with_prev = True
+
+            if not merged_with_prev:
+                if (next_in_input is not None
+                        and next_in_input.speaker == current.speaker):
+                    merged_dur = next_in_input.end - current.start
+                    if merged_dur <= self.config.max_merged_duration:
+                        merged = SpeakerSegment(
+                            start=current.start,
+                            end=next_in_input.end,
+                            speaker=current.speaker,
+                        )
+                        result.append(merged)
+                        merged_with_next = True
+                        i += 1  # пропускаем next, он уже объединён
+
+            if not merged_with_prev and not merged_with_next:
+                result.append(current)
+
+            i += 1
+        
+        return result
     
     def align_segment_boundaries(
         self,

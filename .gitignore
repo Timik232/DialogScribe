@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+GigaAM/
+
 # C extensions
 *.so
 
@@ -142,3 +144,20 @@ cython_debug/
 
 # pyro
 *.pyro
+
+frontend/node_modules/
+frontend/.svelte-kit/
+frontend/build/
+
+# Sisyphus work tracking (local only)
+.sisyphus/
+
+# Playwright MCP state
+.playwright-mcp/
+
+# Vault secrets
+vault/
+
+# Stray files in project root
+/*.png
+my_py_venv.txt

@@ -4,6 +4,7 @@
 
 import pytest
 from pathlib import Path
+from unittest.mock import patch, MagicMock
 
 from gigaam_transcriber import (
     AudioProcessor,
@@ -88,3 +89,46 @@ class TestAudioProcessorFormats:
         assert '.avi' in formats
         assert '.mov' in formats
         assert '.webm' in formats
+
+
+class TestAudioProcessorDenoise:
+
+    @patch("gigaam_transcriber.audio_processor.subprocess.run")
+    def test_normalize_denoise_none_no_filter(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        try:
+            processor = AudioProcessor()
+        except FFmpegNotFoundError:
+            pytest.skip("FFmpeg not installed")
+
+        processor.normalize("test.wav", denoise="none")
+        cmd = mock_run.call_args[0][0]
+        assert "-af" not in cmd
+        assert "arnndn" not in " ".join(cmd)
+        assert "afftdn" not in " ".join(cmd)
+
+    @patch("gigaam_transcriber.audio_processor.subprocess.run")
+    def test_normalize_denoise_light_arnndn(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        try:
+            processor = AudioProcessor()
+        except FFmpegNotFoundError:
+            pytest.skip("FFmpeg not installed")
+
+        processor.normalize("test.wav", denoise="light")
+        cmd = mock_run.call_args[0][0]
+        assert "-af" in cmd
+        assert "arnndn" in cmd
+
+    @patch("gigaam_transcriber.audio_processor.subprocess.run")
+    def test_normalize_denoise_medium_afftdn(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        try:
+            processor = AudioProcessor()
+        except FFmpegNotFoundError:
+            pytest.skip("FFmpeg not installed")
+
+        processor.normalize("test.wav", denoise="medium")
+        cmd = mock_run.call_args[0][0]
+        assert "-af" in cmd
+        assert "afftdn=nf=-25" in cmd

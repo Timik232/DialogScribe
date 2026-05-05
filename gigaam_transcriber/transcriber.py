@@ -1,5 +1,5 @@
 """
-Основной класс GigaAMTranscriber - фасад для работы с GigaAM.
+Основной класс GigaAMTranscriber - фасад для работы с Mistral Voxtral API.
 
 Обеспечивает:
 - Транскрипцию аудио и видео файлов любой длительности
@@ -7,18 +7,15 @@
 - Различные форматы вывода
 """
 
-import hashlib
+from __future__ import annotations
+
 import logging
 import os
-import sys
-import tempfile
 import time
 import warnings
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Union
-
-import numpy as np
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from .audio_processor import AudioProcessor
 from .data_models import (
@@ -28,207 +25,164 @@ from .data_models import (
     TranscriptionResult,
     TranscriptionSegment,
 )
-from .diarization import DiarizationManager
+from .diarization import DiarizationManager, HybridDiarization
 from .exceptions import (
-    AudioProcessingError,
-    DiarizationError,
     EmptyAudioError,
     EmptyFileError,
-    HFTokenMissingError,
-    ModelLoadError,
-    TranscriberError,
     UnsupportedFormatError,
 )
-from .formatters import format_output, save_result
-from .segment_merger import MergeConfig, SegmentMerger, merge_segments
+from .formatters import save_result
+from .mistral_client import MistralASRClient
+from .segment_merger import MergeConfig, SegmentMerger
 
 logger = logging.getLogger(__name__)
 
-# Добавляем путь к GigaAM в PYTHONPATH
-GIGAAM_PATH = Path(__file__).parent.parent / "GigaAM"
-if str(GIGAAM_PATH) not in sys.path:
-    sys.path.insert(0, str(GIGAAM_PATH))
+CHUNK_THRESHOLD_SEC = 1800.0
+CHUNK_DURATION_SEC = 300.0
 
 
 class GigaAMTranscriber:
     """
-    Фасад для работы с GigaAM транскрипцией.
-    
-    Принципы:
-    - Lazy loading моделей (загружаются при первом использовании)
-    - Единообразный интерфейс для audio/video
-    - Прозрачная обработка любой длительности
-    - Graceful degradation при отсутствии HF_TOKEN
-    
-    Примеры использования:
-    
-    >>> # Простая транскрипция
-    >>> transcriber = GigaAMTranscriber()
-    >>> result = transcriber.transcribe("audio.wav")
-    >>> print(result.text)
-    
-    >>> # С диаризацией
-    >>> result = transcriber.transcribe("meeting.mp4", diarization="pyannote")
-    >>> for seg in result.segments:
-    ...     print(f"{seg.speaker}: {seg.text}")
-    
-    >>> # Сохранение в файл
-    >>> result.save("transcript.json", format="json")
+    Фасад транскрипции с использованием Mistral Voxtral API.
+
+    Класс сохраняет имя для обратной совместимости,
+    но внутри использует облачный ASR вместо локальной GigaAM модели.
     """
-    
-    # Ограничение GigaAM для метода transcribe()
-    MAX_SHORT_DURATION = 25.0  # секунд
-    
+
     def __init__(
         self,
-        model_name: str = "v3_e2e_rnnt",
-        device: str = "auto",
+        api_key: Optional[str] = None,
+        asr_url: str = "https://api.mistral.ai",
+        asr_model: str = "voxtral-mini-latest",
         hf_token: Optional[str] = None,
         cache_dir: Optional[Path] = None,
         verbose: bool = False,
-        fp16_encoder: bool = True,
-    ):
-        """
-        Инициализация транскрибера.
-        
-        Args:
-            model_name: Имя модели GigaAM ("v3_e2e_rnnt", "v3_e2e_ctc", и т.д.)
-            device: Устройство ("auto", "cuda", "cpu")
-            hf_token: HuggingFace токен для pyannote диаризации
-            cache_dir: Директория для кэша
-            verbose: Подробный вывод
-            fp16_encoder: Использовать FP16 для энкодера (быстрее на GPU)
-        """
-        self.model_name = model_name
-        self.device = self._resolve_device(device)
+        proxy: Optional[str] = None,
+        chunk_threshold: float = CHUNK_THRESHOLD_SEC,
+        chunk_duration: float = CHUNK_DURATION_SEC,
+        min_request_interval: float = 1.0,
+    ) -> None:
+        self.api_key = api_key or os.getenv("MISTRAL_API_KEY", "")
+        self.asr_url = asr_url
+        self.asr_model = asr_model
+        self.proxy = proxy or os.getenv("PROXY_URL")
         self.hf_token = hf_token or os.getenv("HF_TOKEN")
-        self.cache_dir = Path(cache_dir) if cache_dir else Path.home() / ".cache" / "gigaam_transcriber"
+        self.cache_dir = (
+            Path(cache_dir) if cache_dir else Path.home() / ".cache" / "gigaam_transcriber"
+        )
         self.verbose = verbose
-        self.fp16_encoder = fp16_encoder
-        
-        # Lazy-loaded компоненты
-        self._model = None
-        self._audio_processor = None
-        self._diarization_manager = None
-        
-        # Создание директории кэша
+        self.chunk_threshold = chunk_threshold
+        self.chunk_duration = chunk_duration
+        self._min_request_interval = min_request_interval
+
+        self._audio_processor: Optional[AudioProcessor] = None
+        self._diarization_manager: Optional[DiarizationManager] = None
+        self._asr_client: Optional[MistralASRClient] = None
+
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Настройка логирования
+
         if verbose:
             logging.basicConfig(level=logging.DEBUG)
-        
-        logger.info(f"GigaAMTranscriber инициализирован: model={model_name}, device={self.device}")
-    
-    def _resolve_device(self, device: str) -> str:
-        """Определение устройства."""
-        if device == "auto":
-            try:
-                import torch
-                return "cuda" if torch.cuda.is_available() else "cpu"
-            except ImportError:
-                return "cpu"
-        return device
-    
-    # =========================================================================
-    # Свойства с ленивой загрузкой
-    # =========================================================================
-    
-    @property
-    def model(self):
-        """GigaAM модель (ленивая загрузка)."""
-        if self._model is None:
-            self._model = self._load_model()
-        return self._model
-    
+
+        logger.info(
+            "GigaAMTranscriber инициализирован: asr_model=%s, asr_url=%s",
+            self.asr_model,
+            self.asr_url,
+        )
+
     @property
     def audio_processor(self) -> AudioProcessor:
         """Процессор аудио (ленивая загрузка)."""
         if self._audio_processor is None:
             self._audio_processor = AudioProcessor()
         return self._audio_processor
-    
+
     @property
     def diarization_manager(self) -> DiarizationManager:
         """Менеджер диаризации (ленивая загрузка)."""
         if self._diarization_manager is None:
             self._diarization_manager = DiarizationManager(
                 hf_token=self.hf_token,
-                device=self.device,
+                device="auto",
             )
         return self._diarization_manager
-    
-    def _load_model(self):
-        """Загрузка GigaAM модели."""
-        try:
-            import gigaam
-        except ImportError:
-            raise ModelLoadError(
-                self.model_name,
-                cause=ImportError(
-                    "gigaam не установлен. "
-                    "Установите: pip install -e ./GigaAM"
-                )
+
+    @property
+    def asr_client(self) -> MistralASRClient:
+        if self._asr_client is None:
+            self._asr_client = MistralASRClient(
+                asr_url=self.asr_url,
+                model=self.asr_model,
+                api_key=self.api_key or "",
+                proxy=self.proxy,
+                min_request_interval=self._min_request_interval,
             )
-        
-        try:
-            logger.info(f"Загрузка модели {self.model_name}...")
-            model = gigaam.load_model(
-                self.model_name,
-                fp16_encoder=self.fp16_encoder,
-                device=self.device,
-            )
-            logger.info(f"Модель {self.model_name} загружена успешно")
-            return model
-        except Exception as e:
-            raise ModelLoadError(self.model_name, cause=e)
-    
-    # =========================================================================
-    # Контекстный менеджер
-    # =========================================================================
-    
-    def __enter__(self):
-        """Вход в контекст."""
+        return self._asr_client
+
+    def __enter__(self) -> "GigaAMTranscriber":
         return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Выход из контекста - освобождение ресурсов."""
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.cleanup()
-    
-    def cleanup(self):
-        """Освобождение GPU памяти и ресурсов."""
-        if self._model is not None:
-            del self._model
-            self._model = None
-            
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except ImportError:
-                pass
-        
+
+    def cleanup(self) -> None:
+        """Освобождение ресурсов (HTTP-клиент и временные объекты)."""
+        if self._asr_client is not None:
+            self._asr_client.close()
+            self._asr_client = None
         logger.info("Ресурсы освобождены")
-    
-    # =========================================================================
-    # Валидация
-    # =========================================================================
-    
+
     def _validate_input(self, path: Path) -> None:
         """Валидация входного файла."""
         if not path.exists():
             raise FileNotFoundError(str(path))
-        
+
         if path.stat().st_size == 0:
             raise EmptyFileError(str(path))
-        
+
         if not self.audio_processor.is_supported_file(path):
             raise UnsupportedFormatError(path.suffix)
-    
-    # =========================================================================
-    # Основные методы транскрипции
-    # =========================================================================
-    
+
+    def _prepare_audio(self, audio_path: Path, denoise: str = "none") -> tuple[Path, Optional[Path]]:
+        temp_audio: Optional[Path] = None
+
+        if audio_path.suffix.lower() != ".wav":
+            temp_audio = self.audio_processor.normalize(audio_path, denoise=denoise)
+            return temp_audio, temp_audio
+
+        info = self.audio_processor.get_media_info(audio_path)
+        if info.get("sample_rate") != 16000 or info.get("channels") != 1:
+            temp_audio = self.audio_processor.normalize(audio_path, denoise=denoise)
+            return temp_audio, temp_audio
+
+        return audio_path, None
+
+    def _get_speaker_segments(
+        self,
+        audio_path: Path,
+        mode: DiarizationMode,
+        base_segments: Optional[List[TranscriptionSegment]] = None,
+        **kwargs: Any,
+    ) -> List[SpeakerSegment]:
+        """Получить сегменты спикеров для выбранного режима диаризации."""
+        if mode == "pyannote":
+            return self.diarization_manager.diarize(audio_path, **kwargs)
+
+        if mode == "hybrid":
+            hybrid = HybridDiarization(hf_token=self.hf_token, device="auto")
+            speech_segments = (
+                [(s.start, s.end) for s in base_segments]
+                if base_segments
+                else self.audio_processor.split_by_silence(audio_path)
+            )
+            return hybrid.diarize(
+                audio_path,
+                speech_segments,
+                num_speakers=kwargs.get("num_speakers"),
+            )
+
+        return []
+
     def transcribe(
         self,
         input_path: Union[str, Path],
@@ -241,342 +195,262 @@ class GigaAMTranscriber:
         output_format: OutputFormat = "txt",
         merge_same_speaker: bool = True,
         min_segment_gap: float = 0.5,
+        denoise: str = "none",
     ) -> TranscriptionResult:
-        """
-        Универсальный метод транскрипции.
-        
-        Автоматически определяет тип файла (audio/video) и выбирает
-        оптимальную стратегию обработки.
-        
-        Args:
-            input_path: Путь к входному файлу (аудио или видео)
-            output_path: Путь для сохранения результата (опционально)
-            diarization: Режим диаризации ("none", "pyannote", "hybrid")
-            num_speakers: Точное количество спикеров (если известно)
-            min_speakers: Минимальное количество спикеров
-            max_speakers: Максимальное количество спикеров
-            language: Язык ("ru")
-            output_format: Формат вывода ("txt", "json", "srt", "vtt")
-            merge_same_speaker: Объединять смежные реплики одного спикера
-            min_segment_gap: Минимальный gap для объединения (секунды)
-            
-        Returns:
-            TranscriptionResult с текстом, сегментами и метаданными
-        """
+        """Универсальный метод транскрипции аудио/видео."""
         input_path = Path(input_path)
         start_time = time.time()
-        
-        # Валидация
+
         self._validate_input(input_path)
-        
-        logger.info(f"Начало транскрипции: {input_path}")
-        
-        # Graceful degradation для диаризации
+        logger.info("Начало транскрипции: %s", input_path)
+
         if diarization != "none" and self.hf_token is None:
             warnings.warn(
                 "HF_TOKEN не установлен, диаризация будет пропущена. "
                 "Установите переменную окружения HF_TOKEN для диаризации."
             )
             diarization = "none"
-        
-        # Определяем тип файла и вызываем соответствующий метод
+
+        diarization_kwargs = {
+            "num_speakers": num_speakers,
+            "min_speakers": min_speakers,
+            "max_speakers": max_speakers,
+        }
+
         if self.audio_processor.is_video_file(input_path):
             result = self._transcribe_video(
                 input_path,
                 diarization=diarization,
-                num_speakers=num_speakers,
-                min_speakers=min_speakers,
-                max_speakers=max_speakers,
+                keep_temp_audio=False,
+                denoise=denoise,
+                **diarization_kwargs,
             )
         else:
             result = self._transcribe_audio(
                 input_path,
                 diarization=diarization,
-                num_speakers=num_speakers,
-                min_speakers=min_speakers,
-                max_speakers=max_speakers,
+                denoise=denoise,
+                **diarization_kwargs,
             )
-        
-        # Сшивка сегментов
+
         if merge_same_speaker and result.segments:
             merger = SegmentMerger(MergeConfig(max_gap=min_segment_gap))
             result.segments = merger.merge_same_speaker_segments(
-                result.segments, 
-                max_gap=min_segment_gap
+                result.segments,
+                max_gap=min_segment_gap,
             )
-            # Обновляем полный текст
             result.text = " ".join(seg.text for seg in result.segments)
-        
-        # Обновление метаданных
+
         processing_time = time.time() - start_time
         result.processing_time = processing_time
         result.language = language
-        result.model_name = self.model_name
+        result.model_name = self.asr_model
         result.metadata["source"] = str(input_path)
-        
+        result.metadata["asr_url"] = self.asr_url
+
         logger.info(
-            f"Транскрипция завершена за {processing_time:.1f}с "
-            f"({len(result.segments)} сегментов)"
+            "Транскрипция завершена за %.1fс (%d сегментов)",
+            processing_time,
+            len(result.segments),
         )
-        
-        # Сохранение результата
+
         if output_path:
             save_result(result, output_path, output_format)
-            logger.info(f"Результат сохранён: {output_path}")
-        
+            logger.info("Результат сохранён: %s", output_path)
+
         return result
-    
+
     def _transcribe_audio(
         self,
         audio_path: Path,
         diarization: DiarizationMode = "none",
-        **diarization_kwargs,
+        denoise: str = "none",
+        **diarization_kwargs: Any,
     ) -> TranscriptionResult:
-        """Внутренний метод транскрипции аудио."""
-        # Подготовка аудио (конвертация в нужный формат)
-        temp_audio = None
+        """Внутренний метод транскрипции аудио через Mistral API."""
+        temp_audio: Optional[Path] = None
         try:
-            if audio_path.suffix.lower() != ".wav":
-                temp_audio = self.audio_processor.prepare_for_gigaam(audio_path)
-                working_audio = temp_audio
-            else:
-                # Проверяем параметры WAV
-                info = self.audio_processor.get_media_info(audio_path)
-                if (info.get("sample_rate") != 16000 or 
-                    info.get("channels") != 1):
-                    temp_audio = self.audio_processor.normalize(audio_path)
-                    working_audio = temp_audio
-                else:
-                    working_audio = audio_path
-            
-            # Получаем длительность
+            working_audio, temp_audio = self._prepare_audio(audio_path, denoise=denoise)
             duration = self.audio_processor.get_duration(working_audio)
-            
-            # Транскрипция
-            if duration <= self.MAX_SHORT_DURATION:
-                segments = self._transcribe_short(working_audio)
+
+            segments: List[TranscriptionSegment]
+            if diarization == "none":
+                if duration >= self.chunk_threshold:
+                    text = self._transcribe_chunked(working_audio, duration)
+                else:
+                    text = self.asr_client.transcribe(str(working_audio)).strip()
+                if not text:
+                    raise EmptyAudioError(str(audio_path))
+                segments = [
+                    TranscriptionSegment(
+                        text=text,
+                        start=0.0,
+                        end=duration,
+                    )
+                ]
             else:
-                segments = self._transcribe_long(working_audio)
-            
-            if not segments:
-                raise EmptyAudioError(str(audio_path))
-            
-            # Диаризация
-            if diarization != "none":
-                segments = self._apply_diarization(
+                speaker_segments = self._get_speaker_segments(
                     working_audio,
-                    segments,
                     mode=diarization,
                     **diarization_kwargs,
                 )
-            
-            # Формирование результата
+                # Предтранскрипционное объединение сегментов для предотвращения галлюцинаций ASR
+                merger = SegmentMerger(MergeConfig(min_presplit_duration=1.0))
+                speaker_segments = merger.merge_speaker_segments(speaker_segments)
+                speaker_segments = merger.merge_short_speaker_segments(speaker_segments)
+                segment_dicts = [
+                    {"start": seg.start, "end": seg.end, "speaker": seg.speaker}
+                    for seg in speaker_segments
+                ]
+                api_segments = self.asr_client.transcribe_segments(
+                    str(working_audio),
+                    segment_dicts,
+                )
+                segments = [
+                    TranscriptionSegment(
+                        text=seg.text.strip(),
+                        start=seg.start,
+                        end=seg.end,
+                        speaker=seg.speaker,
+                    )
+                    for seg in api_segments
+                    if seg.text and seg.text.strip()
+                ]
+                if not segments:
+                    raise EmptyAudioError(str(audio_path))
+
             full_text = " ".join(seg.text for seg in segments)
-            
             return TranscriptionResult(
                 text=full_text,
                 segments=segments,
                 duration=duration,
                 language="ru",
-                model_name=self.model_name,
-                processing_time=0,  # Будет обновлено в transcribe()
+                model_name=self.asr_model,
+                processing_time=0,
                 metadata={"source": str(audio_path)},
             )
-            
         finally:
-            # Удаление временного файла
             if temp_audio and temp_audio != audio_path and temp_audio.exists():
                 try:
                     temp_audio.unlink()
                 except Exception:
                     pass
-    
+
+    def _transcribe_chunked(self, audio_path: Path, duration: float) -> str:
+        chunks = self.audio_processor.split_audio(
+            audio_path,
+            chunk_duration=self.chunk_duration,
+        )
+        chunk_files = [chunk[0] for chunk in chunks]
+        try:
+
+            def _transcribe_one(idx: int, chunk_path: Path) -> tuple[int, str]:
+                text = self.asr_client.transcribe(str(chunk_path))
+                return idx, text.strip() if text else ""
+
+            texts: List[tuple[int, str]] = []
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                futures = {
+                    executor.submit(_transcribe_one, i, path): i
+                    for i, path in enumerate(chunk_files)
+                }
+                for future in as_completed(futures):
+                    idx, text = future.result()
+                    if text:
+                        texts.append((idx, text))
+
+            texts.sort(key=lambda x: x[0])
+            return " ".join(text for _, text in texts)
+        finally:
+            for chunk_file in chunk_files:
+                try:
+                    chunk_file.unlink()
+                except Exception:
+                    pass
+
     def _transcribe_video(
         self,
         video_path: Path,
         keep_temp_audio: bool = False,
-        **kwargs,
+        **kwargs: Any,
     ) -> TranscriptionResult:
-        """Внутренний метод транскрипции видео."""
-        temp_audio = None
+        temp_audio: Optional[Path] = None
+        denoise = kwargs.pop("denoise", "none")
         try:
-            # Извлечение аудио
-            logger.info(f"Извлечение аудио из видео: {video_path}")
+            logger.info("Извлечение аудио из видео: %s", video_path)
             temp_audio = self.audio_processor.extract_audio_from_video(
                 video_path,
                 normalize=True,
             )
-            
-            # Транскрипция извлечённого аудио
-            result = self._transcribe_audio(temp_audio, **kwargs)
+
+            result = self._transcribe_audio(temp_audio, denoise=denoise, **kwargs)
             result.metadata["source"] = str(video_path)
             result.metadata["source_type"] = "video"
-            
             return result
-            
         finally:
             if not keep_temp_audio and temp_audio and temp_audio.exists():
                 try:
                     temp_audio.unlink()
                 except Exception:
                     pass
-    
-    def _transcribe_short(self, audio_path: Path) -> List[TranscriptionSegment]:
-        """Транскрипция короткого аудио (< 25 сек)."""
-        logger.debug(f"Транскрипция короткого аудио: {audio_path}")
-        
-        text = self.model.transcribe(str(audio_path))
-        duration = self.audio_processor.get_duration(audio_path)
-        
-        if not text or not text.strip():
-            return []
-        
-        return [TranscriptionSegment(
-            text=text.strip(),
-            start=0.0,
-            end=duration,
-        )]
-    
-    def _transcribe_long(self, audio_path: Path) -> List[TranscriptionSegment]:
-        """Транскрипция длинного аудио через transcribe_longform."""
-        logger.debug(f"Транскрипция длинного аудио: {audio_path}")
-        
-        try:
-            utterances = self.model.transcribe_longform(str(audio_path))
-        except Exception as e:
-            logger.error(f"Ошибка transcribe_longform: {e}")
-            raise AudioProcessingError(
-                f"Ошибка при транскрипции длинного файла: {e}",
-                file_path=str(audio_path),
-                cause=e,
-            )
-        
-        segments = []
-        for utt in utterances:
-            text = utt["transcription"]
-            start, end = utt["boundaries"]
-            
-            if text and text.strip():
-                segments.append(TranscriptionSegment(
-                    text=text.strip(),
-                    start=start,
-                    end=end,
-                ))
-        
-        return segments
-    
+
     def _apply_diarization(
         self,
         audio_path: Path,
         segments: List[TranscriptionSegment],
         mode: DiarizationMode,
-        **kwargs,
+        **kwargs: Any,
     ) -> List[TranscriptionSegment]:
-        """Применение диаризации к сегментам."""
-        logger.info(f"Применение диаризации: mode={mode}")
-        
-        try:
-            if mode == "pyannote":
-                speaker_segments = self.diarization_manager.diarize(
-                    audio_path,
-                    **kwargs
-                )
-            elif mode == "hybrid":
-                # Для гибридного режима используем VAD сегменты
-                from .diarization import HybridDiarization
-                hybrid = HybridDiarization(
-                    hf_token=self.hf_token,
-                    device=self.device,
-                )
-                speech_segments = [(s.start, s.end) for s in segments]
-                speaker_segments = hybrid.diarize(
-                    audio_path,
-                    speech_segments,
-                    num_speakers=kwargs.get("num_speakers"),
-                )
-            else:
-                return segments
-            
-            # Сопоставление спикеров с транскрипцией
-            segments = self.diarization_manager.map_speakers_to_transcription(
-                segments,
-                speaker_segments,
-            )
-            
+        """Совместимый метод: пере-сопоставление спикеров по готовым сегментам."""
+        if mode == "none" or not segments:
             return segments
-            
-        except HFTokenMissingError:
-            warnings.warn(
-                "HF_TOKEN не установлен, диаризация пропущена."
-            )
+
+        speaker_segments = self._get_speaker_segments(
+            audio_path,
+            mode=mode,
+            base_segments=segments,
+            **kwargs,
+        )
+        if not speaker_segments:
             return segments
-        except Exception as e:
-            logger.error(f"Ошибка диаризации: {e}")
-            warnings.warn(f"Ошибка диаризации, продолжаем без неё: {e}")
-            return segments
-    
-    # =========================================================================
-    # Альтернативные методы
-    # =========================================================================
-    
+
+        return self.diarization_manager.map_speakers_to_transcription(
+            segments,
+            speaker_segments,
+        )
+
     def audio2text(
         self,
         in_audio: Union[str, Path],
         out_text: Optional[Union[str, Path]] = None,
         diarization: DiarizationMode = "none",
-        **kwargs,
+        **kwargs: Any,
     ) -> TranscriptionResult:
-        """
-        Транскрибация аудио файла.
-        
-        Поддерживает: WAV, FLAC, MP3, OGG, M4A, AAC и любые ffmpeg-совместимые форматы.
-        
-        Args:
-            in_audio: Путь к аудио файлу
-            out_text: Путь для сохранения результата
-            diarization: Режим диаризации
-            **kwargs: Дополнительные параметры для transcribe()
-            
-        Returns:
-            TranscriptionResult
-        """
+        """Транскрибация аудио файла."""
         return self.transcribe(
             in_audio,
             output_path=out_text,
             diarization=diarization,
             **kwargs,
         )
-    
+
     def video2text(
         self,
         in_video: Union[str, Path],
         out_text: Optional[Union[str, Path]] = None,
         diarization: DiarizationMode = "none",
         keep_temp_audio: bool = False,
-        **kwargs,
+        **kwargs: Any,
     ) -> TranscriptionResult:
-        """
-        Транскрибация видео файла.
-        
-        Извлекает аудио через ffmpeg, затем транскрибирует.
-        
-        Args:
-            in_video: Путь к видео файлу
-            out_text: Путь для сохранения результата
-            diarization: Режим диаризации
-            keep_temp_audio: Сохранять временный аудио файл
-            **kwargs: Дополнительные параметры для transcribe()
-            
-        Returns:
-            TranscriptionResult
-        """
+        """Транскрибация видео файла."""
+        _ = keep_temp_audio  # Для совместимости сигнатуры
         return self.transcribe(
             in_video,
             output_path=out_text,
             diarization=diarization,
             **kwargs,
         )
-    
+
     def transcribe_batch(
         self,
         input_paths: List[Union[str, Path]],
@@ -584,43 +458,19 @@ class GigaAMTranscriber:
         diarization: DiarizationMode = "none",
         n_workers: int = 1,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> List[TranscriptionResult]:
-        """
-        Пакетная обработка нескольких файлов.
-        
-        Args:
-            input_paths: Список путей к файлам
-            output_dir: Директория для сохранения результатов
-            diarization: Режим диаризации
-            n_workers: Количество параллельных воркеров
-            progress_callback: Callback для прогресса: (current, total, filename)
-            **kwargs: Дополнительные параметры
-            
-        Returns:
-            Список TranscriptionResult
-        """
-        results = []
+        """Пакетная обработка нескольких файлов (с поддержкой потоков)."""
         total = len(input_paths)
-        
         if output_dir:
             output_dir = Path(output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Последовательная обработка (GPU не параллелится)
-        for i, input_path in enumerate(input_paths):
-            input_path = Path(input_path)
-            
-            if progress_callback:
-                progress_callback(i, total, input_path.name)
-            
-            logger.info(f"Обработка {i+1}/{total}: {input_path.name}")
-            
-            # Определение выходного пути
-            output_path = None
-            if output_dir:
-                output_path = output_dir / f"{input_path.stem}.txt"
-            
+
+        ordered_paths = [Path(p) for p in input_paths]
+        results: List[Optional[TranscriptionResult]] = [None] * total
+
+        def _process_one(idx: int, input_path: Path) -> tuple[int, TranscriptionResult]:
+            output_path = output_dir / f"{input_path.stem}.txt" if output_dir else None
             try:
                 result = self.transcribe(
                     input_path,
@@ -628,155 +478,69 @@ class GigaAMTranscriber:
                     diarization=diarization,
                     **kwargs,
                 )
-                results.append(result)
+                return idx, result
             except Exception as e:
-                logger.error(f"Ошибка при обработке {input_path}: {e}")
-                # Создаём пустой результат с ошибкой
-                results.append(TranscriptionResult(
+                logger.error("Ошибка при обработке %s: %s", input_path, e)
+                return idx, TranscriptionResult(
                     text="",
                     segments=[],
                     duration=0,
                     language="ru",
-                    model_name=self.model_name,
+                    model_name=self.asr_model,
                     processing_time=0,
                     metadata={"source": str(input_path), "error": str(e)},
-                ))
-        
+                )
+
+        if n_workers <= 1:
+            for i, input_path in enumerate(ordered_paths):
+                if progress_callback:
+                    progress_callback(i, total, input_path.name)
+                idx, result = _process_one(i, input_path)
+                results[idx] = result
+        else:
+            with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                futures = {
+                    executor.submit(_process_one, i, input_path): i
+                    for i, input_path in enumerate(ordered_paths)
+                }
+                done_count = 0
+                for future in as_completed(futures):
+                    idx, result = future.result()
+                    results[idx] = result
+                    done_count += 1
+                    if progress_callback:
+                        progress_callback(done_count, total, ordered_paths[idx].name)
+
         if progress_callback:
             progress_callback(total, total, "Готово")
-        
-        return results
-    
-    def transcribe_stream(
-        self,
-        audio_iterator: Iterator[np.ndarray],
-        sample_rate: int = 16000,
-        chunk_duration: float = 20.0,
-    ) -> Iterator[TranscriptionSegment]:
-        """
-        Потоковая транскрипция для real-time приложений.
-        
-        Args:
-            audio_iterator: Итератор numpy массивов с аудио данными
-            sample_rate: Частота дискретизации
-            chunk_duration: Длительность чанка в секундах
-            
-        Yields:
-            TranscriptionSegment для каждого обработанного чанка
-        """
-        import torch
-        
-        buffer = []
-        buffer_duration = 0
-        current_time = 0
-        chunk_samples = int(chunk_duration * sample_rate)
-        
-        for chunk in audio_iterator:
-            buffer.append(chunk)
-            buffer_duration += len(chunk) / sample_rate
-            
-            # Когда накопилось достаточно данных
-            while buffer_duration >= chunk_duration:
-                # Собираем чанк
-                audio_data = np.concatenate(buffer)
-                process_samples = min(chunk_samples, len(audio_data))
-                process_chunk = audio_data[:process_samples]
-                
-                # Сохраняем остаток
-                remaining = audio_data[process_samples:]
-                buffer = [remaining] if len(remaining) > 0 else []
-                buffer_duration = len(remaining) / sample_rate
-                
-                # Транскрибируем
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                    temp_path = Path(f.name)
-                
-                try:
-                    import torchaudio
-                    waveform = torch.from_numpy(process_chunk).unsqueeze(0).float()
-                    torchaudio.save(str(temp_path), waveform, sample_rate)
-                    
-                    text = self.model.transcribe(str(temp_path))
-                    
-                    if text and text.strip():
-                        segment_duration = len(process_chunk) / sample_rate
-                        yield TranscriptionSegment(
-                            text=text.strip(),
-                            start=current_time,
-                            end=current_time + segment_duration,
-                        )
-                        current_time += segment_duration
-                finally:
-                    if temp_path.exists():
-                        temp_path.unlink()
-        
-        # Обработка остатка
-        if buffer and buffer_duration > 0.5:  # Минимум 0.5 сек
-            audio_data = np.concatenate(buffer)
-            
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                temp_path = Path(f.name)
-            
-            try:
-                import torchaudio
-                waveform = torch.from_numpy(audio_data).unsqueeze(0).float()
-                torchaudio.save(str(temp_path), waveform, sample_rate)
-                
-                text = self.model.transcribe(str(temp_path))
-                
-                if text and text.strip():
-                    yield TranscriptionSegment(
-                        text=text.strip(),
-                        start=current_time,
-                        end=current_time + buffer_duration,
-                    )
-            finally:
-                if temp_path.exists():
-                    temp_path.unlink()
-    
-    # =========================================================================
-    # Вспомогательные методы
-    # =========================================================================
-    
+
+        return [r for r in results if r is not None]
+
     def get_model_info(self) -> Dict[str, Any]:
-        """Получить информацию о модели."""
+        """Получить информацию о текущей ASR конфигурации."""
         return {
-            "model_name": self.model_name,
-            "device": self.device,
-            "loaded": self._model is not None,
+            "model_name": self.asr_model,
+            "asr_url": self.asr_url,
+            "provider": "mistral",
+            "loaded": self._asr_client is not None,
             "hf_token_set": self.hf_token is not None,
+            "api_key_set": bool(self.api_key),
             "cache_dir": str(self.cache_dir),
         }
-    
-    def preload(self) -> None:
-        """Предзагрузка модели для ускорения первого запроса."""
-        _ = self.model
-        logger.info("Модель предзагружена")
 
 
 def create_transcriber(
-    model_name: str = "v3_e2e_rnnt",
-    device: str = "auto",
+    api_key: Optional[str] = None,
+    asr_url: str = "https://api.mistral.ai",
+    asr_model: str = "voxtral-mini-latest",
     hf_token: Optional[str] = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> GigaAMTranscriber:
-    """
-    Создание транскрибера с заданными параметрами.
-    
-    Это фабричная функция для удобного создания GigaAMTranscriber.
-    
-    Args:
-        model_name: Имя модели
-        device: Устройство
-        hf_token: HuggingFace токен
-        **kwargs: Дополнительные параметры
-        
-    Returns:
-        Настроенный GigaAMTranscriber
-    """
+    """Фабричная функция создания GigaAMTranscriber (на Mistral API)."""
     return GigaAMTranscriber(
-        model_name=model_name,
-        device=device,
+        api_key=api_key,
+        asr_url=asr_url,
+        asr_model=asr_model,
         hf_token=hf_token,
         **kwargs,
     )

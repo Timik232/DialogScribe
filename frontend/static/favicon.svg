@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <!-- Microphone capsule -->
+  <rect x="11" y="4" width="10" height="16" rx="5" fill="#6B7280"/>
+  <!-- U-shaped holder -->
+  <path d="M8 18a8 8 0 0 0 16 0" stroke="#6B7280" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+  <!-- Stand stem -->
+  <line x1="16" y1="26" x2="16" y2="29" stroke="#6B7280" stroke-width="2.5" stroke-linecap="round"/>
+  <!-- Stand base -->
+  <line x1="12" y1="29" x2="20" y2="29" stroke="#6B7280" stroke-width="2.5" stroke-linecap="round"/>
+</svg>

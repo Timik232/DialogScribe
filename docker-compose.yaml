@@ -1,0 +1,73 @@
+services:
+  vault-agent:
+    image: hashicorp/vault:1.18
+    container_name: dialogscribe-vault-agent
+    user: "0:0"
+    environment:
+      - HOME=/tmp
+    volumes:
+      - ./vault/agent.hcl:/etc/vault/agent.hcl:ro
+      - ./vault/secrets.env.tmpl:/etc/vault/secrets.env.tmpl:ro
+      - ./vault/role-id:/etc/vault/role-id:ro
+      - ./vault/secret-id:/etc/vault/secret-id:ro
+      - ./vault/secrets:/etc/vault/secrets
+    command: agent -config=/etc/vault/agent.hcl -log-level=info
+    restart: unless-stopped
+    networks:
+      - secrets-net
+
+  dialogscribe-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - HF_TOKEN=${HF_TOKEN:-}
+    network_mode: host
+    runtime: nvidia
+    depends_on:
+      - vault-agent
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    command: ["python", "api.py"]
+    environment:
+      - ASR_URL=https://api.mistral.ai
+      - ASR_MODEL=voxtral-mini-latest
+      - PYANNOTE_MODEL=pyannote/speaker-diarization-3.1
+      - GRADIO_SERVER_NAME=0.0.0.0
+      - GRADIO_SERVER_PORT=7860
+      # GRADIO_USERNAME and GRADIO_PASSWORD are loaded from Vault via entrypoint.sh
+      # Do NOT set them here — they would override Vault values with empty strings
+      - PROXY_URL=http://172.17.0.1:7890
+      - API_KEY=${API_KEY:-}
+      - MAX_UPLOAD_SIZE_MB=${MAX_UPLOAD_SIZE_MB:-1024}
+      - DATABASE_URL=${DATABASE_URL:-}
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - SMTP_HOST=${SMTP_HOST:-smtp.mail.ru}
+      - SMTP_PORT=${SMTP_PORT:-465}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+      - SMTP_USE_TLS=${SMTP_USE_TLS:-true}
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:5173}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7860/health'); print('healthy')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    volumes:
+      - ./data:/app/data
+      - ./samples:/app/samples
+      - ./vault/secrets:/etc/vault/secrets:ro
+      - ./entrypoint.sh:/entrypoint.sh:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["all"]
+              capabilities: [gpu]
+
+networks:
+  secrets-net:
+    external: true

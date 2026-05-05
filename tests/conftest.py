@@ -28,13 +28,9 @@ def temp_dir() -> Generator[Path, None, None]:
 
 
 @pytest.fixture(scope="session")
-def has_gpu() -> bool:
-    """Проверка наличия GPU."""
-    try:
-        import torch
-        return torch.cuda.is_available()
-    except ImportError:
-        return False
+def has_api_key() -> bool:
+    """Проверка наличия Mistral API ключа."""
+    return os.getenv("MISTRAL_API_KEY") is not None
 
 
 @pytest.fixture(scope="session")
@@ -53,7 +49,7 @@ def hf_token() -> str | None:
 def sample_transcription_segment():
     """Пример сегмента транскрипции."""
     from gigaam_transcriber import TranscriptionSegment
-    
+
     return TranscriptionSegment(
         text="Привет, как дела?",
         start=0.0,
@@ -66,7 +62,7 @@ def sample_transcription_segment():
 def sample_transcription_result(sample_transcription_segment):
     """Пример результата транскрипции."""
     from gigaam_transcriber import TranscriptionResult, TranscriptionSegment
-    
+
     segments = [
         sample_transcription_segment,
         TranscriptionSegment(
@@ -82,29 +78,57 @@ def sample_transcription_result(sample_transcription_segment):
             speaker="Спикер №2",
         ),
     ]
-    
+
     return TranscriptionResult(
         text="Привет, как дела? Отлично, спасибо! А у тебя как?",
         segments=segments,
         duration=5.5,
         language="ru",
-        model_name="v3_e2e_rnnt",
+        model_name="voxtral-mini-latest",
         processing_time=1.5,
         metadata={"source": "test.wav"},
     )
 
 
 def pytest_configure(config):
-    """Конфигурация маркеров pytest."""
-    config.addinivalue_line(
-        "markers", "slow: marks tests as slow"
-    )
-    config.addinivalue_line(
-        "markers", "requires_gpu: marks tests that require GPU"
-    )
+    config.addinivalue_line("markers", "slow: marks tests as slow")
+    config.addinivalue_line("markers", "requires_gpu: marks tests that require GPU")
     config.addinivalue_line(
         "markers", "requires_hf_token: marks tests that require HuggingFace token"
     )
     config.addinivalue_line(
-        "markers", "requires_model: marks tests that require GigaAM model"
+        "markers", "requires_model: marks tests that require Mistral API access"
     )
+
+
+def make_mock_user():
+    from gigaam_transcriber.models import User
+
+    return User(
+        id="test-user-id",
+        email="test@test.com",
+        username="testuser",
+        password_hash="",
+        role="user",
+        is_active=True,
+    )
+
+
+def setup_auth_override(app):
+    from gigaam_transcriber.auth import get_current_user
+
+    app.dependency_overrides[get_current_user] = lambda: make_mock_user()
+
+
+def clear_auth_override(app):
+    from gigaam_transcriber.auth import get_current_user
+
+    app.dependency_overrides.pop(get_current_user, None)
+
+
+def setup_usage_mocks():
+    from unittest.mock import patch, AsyncMock
+
+    limit_patch = patch("gigaam_transcriber.limits.check_limit", new_callable=AsyncMock)
+    usage_patch = patch("gigaam_transcriber.usage.track_usage", new_callable=AsyncMock)
+    return limit_patch, usage_patch

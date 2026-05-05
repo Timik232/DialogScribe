@@ -123,7 +123,6 @@ gigaam-transcribe audio.wav
 # С диаризацией
 gigaam-transcribe meeting.mp4 -d pyannote --speakers 3 -o meeting.txt
 
-
 # Вывод в JSON
 gigaam-transcribe interview.mp3 -d pyannote -f json -o interview.json
 

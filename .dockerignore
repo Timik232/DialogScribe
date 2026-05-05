@@ -1,0 +1,39 @@
+# Frontend dev artifacts
+frontend/node_modules/
+frontend/.svelte-kit/
+frontend/build/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# OpenSpec / planning
+.sisyphus/
+.opencode/
+.claude/
+openspec/
+
+# Secrets
+vault/
+.env
+.env.*
+
+# Docker
+docker-compose*.yaml
+Dockerfile
+
+# Misc
+*.md
+!README.md
+rebuild.sh
+mindmap.py

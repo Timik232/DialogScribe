@@ -137,3 +137,160 @@ class TestMergeSegmentsFunction:
         result = merge_segments(segments, merge_same_speaker=False)
         
         assert len(result) == 2
+
+
+class TestMergeShortSpeakerSegments:
+    """Тесты для merge_short_speaker_segments."""
+
+    def test_merge_short_same_speaker(self):
+        """Тест объединения коротких сегментов одного спикера."""
+        merger = SegmentMerger(MergeConfig(min_presplit_duration=1.0))
+        segments = [
+            SpeakerSegment(start=0.0, end=0.3, speaker='A'),
+            SpeakerSegment(start=0.3, end=0.6, speaker='A'),
+        ]
+        result = merger.merge_short_speaker_segments(segments)
+
+        assert len(result) == 1
+        assert result[0].start == 0.0
+        assert result[0].end == 0.6
+        assert result[0].speaker == 'A'
+
+    def test_merge_short_chain(self):
+        """Тест цепочного объединения нескольких коротких сегментов одного спикера."""
+        merger = SegmentMerger(MergeConfig(min_presplit_duration=1.0))
+        segments = [
+            SpeakerSegment(start=0.0, end=0.3, speaker='A'),
+            SpeakerSegment(start=0.3, end=0.6, speaker='A'),
+            SpeakerSegment(start=0.6, end=0.9, speaker='A'),
+            SpeakerSegment(start=0.9, end=5.0, speaker='A'),
+        ]
+        result = merger.merge_short_speaker_segments(segments)
+
+        assert len(result) == 1
+        assert result[0].start == 0.0
+        assert result[0].end == 5.0
+        assert result[0].speaker == 'A'
+
+    def test_no_cross_speaker_merge(self):
+        """Тест: короткий сегмент между разными спикерами не объединяется."""
+        merger = SegmentMerger(MergeConfig(min_presplit_duration=1.0))
+        segments = [
+            SpeakerSegment(start=0.0, end=5.0, speaker='A'),
+            SpeakerSegment(start=5.0, end=5.5, speaker='B'),
+            SpeakerSegment(start=5.5, end=10.0, speaker='C'),
+        ]
+        result = merger.merge_short_speaker_segments(segments)
+
+        assert len(result) == 3
+        assert result[0].speaker == 'A'
+        assert result[0].start == 0.0
+        assert result[0].end == 5.0
+        assert result[1].speaker == 'B'
+        assert result[1].start == 5.0
+        assert result[1].end == 5.5
+        assert result[2].speaker == 'C'
+        assert result[2].start == 5.5
+        assert result[2].end == 10.0
+
+    def test_long_segments_unchanged(self):
+        """Тест: длинные сегменты (выше порога) не объединяются."""
+        merger = SegmentMerger(MergeConfig(min_presplit_duration=1.0))
+        segments = [
+            SpeakerSegment(start=0.0, end=5.0, speaker='A'),
+            SpeakerSegment(start=5.0, end=10.0, speaker='A'),
+        ]
+        result = merger.merge_short_speaker_segments(segments)
+
+        assert len(result) == 2
+        assert result[0].start == 0.0
+        assert result[0].end == 5.0
+        assert result[1].start == 5.0
+        assert result[1].end == 10.0
+
+    def test_empty_list(self):
+        """Тест: пустой список возвращает пустой список."""
+        merger = SegmentMerger(MergeConfig(min_presplit_duration=1.0))
+        result = merger.merge_short_speaker_segments([])
+
+        assert result == []
+
+    def test_single_segment(self):
+        """Тест: один сегмент возвращается без изменений."""
+        merger = SegmentMerger(MergeConfig(min_presplit_duration=1.0))
+        segments = [
+            SpeakerSegment(start=0.0, end=0.3, speaker='A'),
+        ]
+        result = merger.merge_short_speaker_segments(segments)
+
+        assert len(result) == 1
+        assert result[0].start == 0.0
+        assert result[0].end == 0.3
+        assert result[0].speaker == 'A'
+
+    def test_mixed_long_and_short(self):
+        """Тест: смесь длинных и коротких сегментов одного спикера."""
+        merger = SegmentMerger(MergeConfig(min_presplit_duration=1.0))
+        segments = [
+            SpeakerSegment(start=0.0, end=0.5, speaker='A'),
+            SpeakerSegment(start=0.5, end=5.0, speaker='A'),
+            SpeakerSegment(start=5.0, end=5.3, speaker='A'),
+            SpeakerSegment(start=5.3, end=10.0, speaker='A'),
+        ]
+        result = merger.merge_short_speaker_segments(segments)
+
+        assert len(result) == 2
+        assert result[0].start == 0.0
+        assert result[0].end == 5.3
+        assert result[0].speaker == 'A'
+        assert result[1].start == 5.3
+        assert result[1].end == 10.0
+        assert result[1].speaker == 'A'
+
+    def test_max_merged_duration(self):
+        """Тест: объединение ограничено max_merged_duration."""
+        merger = SegmentMerger(
+            MergeConfig(min_presplit_duration=1.0, max_merged_duration=5.0)
+        )
+        segments = [
+            SpeakerSegment(start=0.0, end=3.0, speaker='A'),
+            SpeakerSegment(start=3.0, end=3.5, speaker='A'),
+            SpeakerSegment(start=3.5, end=7.0, speaker='A'),
+        ]
+        result = merger.merge_short_speaker_segments(segments)
+
+        # [0-3] длинный, [3-3.5] короткий → поглощается (0-3.5 < 5)
+        # [3.5-7] длинный, prev в result = [0-3.5], merged_dur = 7-0 = 7 > 5 → не объединяется
+        assert len(result) == 2
+        assert result[0].start == 0.0
+        assert result[0].end == 3.5
+        assert result[1].start == 3.5
+        assert result[1].end == 7.0
+
+    def test_short_first_segment(self):
+        """Тест: первый короткий сегмент объединяется со следующим того же спикера."""
+        merger = SegmentMerger(MergeConfig(min_presplit_duration=1.0))
+        segments = [
+            SpeakerSegment(start=0.0, end=0.3, speaker='A'),
+            SpeakerSegment(start=0.3, end=5.0, speaker='A'),
+        ]
+        result = merger.merge_short_speaker_segments(segments)
+
+        assert len(result) == 1
+        assert result[0].start == 0.0
+        assert result[0].end == 5.0
+        assert result[0].speaker == 'A'
+
+    def test_short_last_segment(self):
+        """Тест: последний короткий сегмент объединяется с предыдущим того же спикера."""
+        merger = SegmentMerger(MergeConfig(min_presplit_duration=1.0))
+        segments = [
+            SpeakerSegment(start=0.0, end=5.0, speaker='A'),
+            SpeakerSegment(start=5.0, end=5.3, speaker='A'),
+        ]
+        result = merger.merge_short_speaker_segments(segments)
+
+        assert len(result) == 1
+        assert result[0].start == 0.0
+        assert result[0].end == 5.3
+        assert result[0].speaker == 'A'
