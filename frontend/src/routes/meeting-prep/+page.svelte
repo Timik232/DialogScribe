@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { fetchApi } from '$lib/services/api';
 	import { marked } from 'marked';
+	import { Document, Packer, Paragraph, TextRun, HeadingLevel, Table, TableRow, TableCell, WidthType, BorderStyle, AlignmentType } from 'docx';
+	import { saveAs } from 'file-saver';
 
 	let models: Array<{ id: string; name: string }> = $state([]);
 	let selectedModel = $state('');
@@ -14,6 +16,7 @@
 	let resultMarkdown = $state('');
 	let resultModel = $state('');
 	let resultId = $state('');
+	let resultHtml = $derived(resultMarkdown ? (marked.parse(resultMarkdown, { breaks: true }) as string) : '');
 
 	let llmAvailable = $state(true);
 	let llmChecked = $state(false);
@@ -72,10 +75,6 @@
 		}
 	}
 
-	function renderMarkdown(md: string): string {
-		return marked.parse(md, { breaks: true }) as string;
-	}
-
 	function downloadBlob(blob: Blob, filename: string): void {
 		const url = URL.createObjectURL(blob);
 		const a = document.createElement('a');
@@ -93,16 +92,90 @@
 
 	function exportHtml(): void {
 		if (!resultMarkdown) return;
-		const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Подготовка к встрече</title><style>body{font-family:Arial,sans-serif;max-width:800px;margin:2em auto;padding:0 1em;line-height:1.7;color:#222}h1{font-size:1.4em}h2{font-size:1.2em;margin-top:1.5em}h3{font-size:1.05em}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:6px 10px;text-align:left}th{background:#f5f5f5}</style></head><body>${renderMarkdown(resultMarkdown)}</body></html>`;
+		const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Подготовка к встрече</title><style>body{font-family:Arial,sans-serif;max-width:800px;margin:2em auto;padding:0 1em;line-height:1.7;color:#222}h1{font-size:1.4em}h2{font-size:1.2em;margin-top:1.5em}h3{font-size:1.05em}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:6px 10px;text-align:left}th{background:#f5f5f5}</style></head><body>${resultHtml}</body></html>`;
 		const blob = new Blob([html], { type: 'text/html; charset=utf-8' });
 		downloadBlob(blob, 'meeting-prep-plan.html');
 	}
 
-	function exportDoc(): void {
+	async function exportDocx(): Promise<void> {
 		if (!resultMarkdown) return;
-		const html = `<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word'><head><meta charset="utf-8"><style>body{font-family:Arial,sans-serif;line-height:1.7}h1{font-size:1.4em}h2{font-size:1.2em;margin-top:1.5em}h3{font-size:1.05em}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:6px 10px}th{background:#f5f5f5}</style></head><body>${renderMarkdown(resultMarkdown)}</body></html>`;
-		const blob = new Blob([html], { type: 'application/msword' });
-		downloadBlob(blob, 'meeting-prep-plan.doc');
+
+		const lines = resultMarkdown.split('\n');
+		const children: (Paragraph | Table)[] = [];
+		let i = 0;
+
+		while (i < lines.length) {
+			const line = lines[i];
+
+			if (line.startsWith('|')) {
+				const tableLines: string[] = [];
+				while (i < lines.length && lines[i].startsWith('|')) {
+					tableLines.push(lines[i]);
+					i++;
+				}
+				const rows = tableLines
+					.filter((l) => !l.match(/^\|[\s\-:|]+\|$/))
+					.map((l) => l.split('|').slice(1, -1).map((c) => c.trim()));
+				if (rows.length > 0) {
+					const tableRows = rows.map(
+						(cells, idx) =>
+							new TableRow({
+								tableHeader: idx === 0,
+								children: cells.map(
+									(cell) =>
+										new TableCell({
+											width: { size: Math.floor(100 / cells.length), type: WidthType.PERCENTAGE },
+											children: [
+												new Paragraph({
+													children: [new TextRun({ text: cell, bold: idx === 0, size: 22, font: 'Arial' })],
+													spacing: { after: 40 },
+												}),
+											],
+										})
+								),
+							})
+					);
+					children.push(
+						new Table({
+							rows: tableRows,
+							width: { size: 100, type: WidthType.PERCENTAGE },
+						})
+					);
+				}
+				continue;
+			}
+
+			if (line.startsWith('### ')) {
+				children.push(new Paragraph({ text: line.slice(4), heading: HeadingLevel.HEADING_3, spacing: { before: 200, after: 100 } }));
+			} else if (line.startsWith('## ')) {
+				children.push(new Paragraph({ text: line.slice(3), heading: HeadingLevel.HEADING_2, spacing: { before: 240, after: 120 } }));
+			} else if (line.startsWith('# ')) {
+				children.push(new Paragraph({ text: line.slice(2), heading: HeadingLevel.HEADING_1, spacing: { before: 300, after: 160 } }));
+			} else if (line.startsWith('- ') || line.startsWith('* ')) {
+				const text = line.slice(2).replace(/\*\*(.+?)\*\*/g, '$1').replace(/\*(.+?)\*/g, '$1');
+				children.push(new Paragraph({ children: [new TextRun({ text: `• ${text}`, size: 22, font: 'Arial' })], spacing: { after: 40 }, indent: { left: 360 } }));
+			} else if (/^\d+\.\s/.test(line)) {
+				const text = line.replace(/^\d+\.\s/, '').replace(/\*\*(.+?)\*\*/g, '$1').replace(/\*(.+?)\*/g, '$1');
+				children.push(new Paragraph({ children: [new TextRun({ text, size: 22, font: 'Arial' })], spacing: { after: 40 }, indent: { left: 360 } }));
+			} else if (line.trim()) {
+				const parts = line.split(/(\*\*.+?\*\*|\*.+?\*)/g);
+				const runs = parts
+					.filter((p) => p)
+					.map((part) => {
+						if (part.startsWith('**') && part.endsWith('**')) return new TextRun({ text: part.slice(2, -2), bold: true, size: 22, font: 'Arial' });
+						if (part.startsWith('*') && part.endsWith('*')) return new TextRun({ text: part.slice(1, -1), italics: true, size: 22, font: 'Arial' });
+						return new TextRun({ text: part, size: 22, font: 'Arial' });
+					});
+				children.push(new Paragraph({ children: runs, spacing: { after: 80 } }));
+			}
+			i++;
+		}
+
+		const doc = new Document({
+			sections: [{ children }],
+		});
+		const blob = await Packer.toBlob(doc);
+		saveAs(blob, 'meeting-prep-plan.docx');
 	}
 </script>
 
@@ -193,13 +266,13 @@
 							<span class="badge badge-model">{resultModel}</span>
 							<div class="export-buttons">
 								<button class="btn btn-secondary btn-sm" onclick={exportTxt}>TXT</button>
-								<button class="btn btn-secondary btn-sm" onclick={exportDoc}>DOC</button>
+								<button class="btn btn-secondary btn-sm" onclick={exportDocx}>DOCX</button>
 								<button class="btn btn-secondary btn-sm" onclick={exportHtml}>HTML</button>
 							</div>
 						</div>
 					</div>
 					<div class="result-content">
-						{@html renderMarkdown(resultMarkdown)}
+						{@html resultHtml}
 					</div>
 				</div>
 			{/if}

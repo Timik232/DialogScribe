@@ -141,7 +141,7 @@ async def generate_meeting_prep(
         )
 
     try:
-        result = await asyncio.to_thread(llm_client.call, SYSTEM_PROMPT, user_message)
+        result = await asyncio.to_thread(llm_client.call, SYSTEM_PROMPT, user_message, 16384)
     finally:
         if model_override:
             llm_client.update_config(
