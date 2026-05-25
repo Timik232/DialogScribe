@@ -1,10 +1,11 @@
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from gigaam_transcriber.auth import get_current_user
 from gigaam_transcriber.database import get_db
 from gigaam_transcriber.limits import check_limit
-from gigaam_transcriber.models import User, MeetingPrepPlan
+from gigaam_transcriber.models import User
 from gigaam_transcriber.summarizer import LLMClient
 from gigaam_transcriber.usage import track_usage
 from gigaam_transcriber.meeting_prep.schemas import MeetingPrepRequest, MeetingPrepResponse
@@ -25,7 +26,7 @@ def _ensure_llm() -> None:
 async def post_meeting_prep(
     body: MeetingPrepRequest,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db=Depends(get_db),
 ):
     _ensure_llm()
     await check_limit(db, user.id, "llm_call")
@@ -36,21 +37,11 @@ async def post_meeting_prep(
             body.company_data, body.catalog_data, llm_client,
             model_override=model_override,
         )
-        plan = MeetingPrepPlan(
-            user_id=user.id,
-            company_data=body.company_data,
-            catalog_data=body.catalog_data,
-            result_markdown=result,
-            model_used=model_used,
-        )
-        db.add(plan)
-        await db.commit()
-        await db.refresh(plan)
         await track_usage(db, user.id, "llm_call", 1.0)
         return MeetingPrepResponse(
-            id=plan.id,
-            markdown=plan.result_markdown,
-            model=plan.model_used,
+            id=str(uuid.uuid4()),
+            markdown=result,
+            model=model_used,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
