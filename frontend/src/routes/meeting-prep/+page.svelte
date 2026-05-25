@@ -1,7 +1,6 @@
 <script lang="ts">
 	import { fetchApi } from '$lib/services/api';
 	import { marked } from 'marked';
-	import { authStore } from '$lib/stores/auth';
 
 	let models: Array<{ id: string; name: string }> = $state([]);
 	let selectedModel = $state('');
@@ -92,58 +91,18 @@
 		downloadBlob(blob, 'meeting-prep-plan.txt');
 	}
 
-	function getToken(): string {
-		let token = '';
-		authStore.subscribe((s) => (token = s.accessToken))();
-		return token;
+	function exportHtml(): void {
+		if (!resultMarkdown) return;
+		const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Подготовка к встрече</title><style>body{font-family:Arial,sans-serif;max-width:800px;margin:2em auto;padding:0 1em;line-height:1.7;color:#222}h1{font-size:1.4em}h2{font-size:1.2em;margin-top:1.5em}h3{font-size:1.05em}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:6px 10px;text-align:left}th{background:#f5f5f5}</style></head><body>${renderMarkdown(resultMarkdown)}</body></html>`;
+		const blob = new Blob([html], { type: 'text/html; charset=utf-8' });
+		downloadBlob(blob, 'meeting-prep-plan.html');
 	}
 
-	async function exportDocx(): Promise<void> {
+	function exportDoc(): void {
 		if (!resultMarkdown) return;
-		try {
-			const res = await fetch('/api/export', {
-				method: 'POST',
-				credentials: 'include',
-				headers: {
-					'Content-Type': 'application/json',
-					'Authorization': `Bearer ${getToken()}`,
-				},
-				body: JSON.stringify({
-					data: { text: resultMarkdown, segments: [], duration: 0, language: 'ru' },
-					format: 'docx',
-					filename: 'meeting-prep-plan',
-				}),
-			});
-			if (!res.ok) throw new Error(`Export failed: ${res.status}`);
-			const blob = await res.blob();
-			downloadBlob(blob, 'meeting-prep-plan.docx');
-		} catch (e: any) {
-			errorMsg = e?.message ?? 'Ошибка экспорта DOCX';
-		}
-	}
-
-	async function exportPdf(): Promise<void> {
-		if (!resultMarkdown) return;
-		try {
-			const res = await fetch('/api/export', {
-				method: 'POST',
-				credentials: 'include',
-				headers: {
-					'Content-Type': 'application/json',
-					'Authorization': `Bearer ${getToken()}`,
-				},
-				body: JSON.stringify({
-					data: { text: resultMarkdown, segments: [], duration: 0, language: 'ru' },
-					format: 'pdf',
-					filename: 'meeting-prep-plan',
-				}),
-			});
-			if (!res.ok) throw new Error(`Export failed: ${res.status}`);
-			const blob = await res.blob();
-			downloadBlob(blob, 'meeting-prep-plan.pdf');
-		} catch (e: any) {
-			errorMsg = e?.message ?? 'Ошибка экспорта PDF';
-		}
+		const html = `<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word'><head><meta charset="utf-8"><style>body{font-family:Arial,sans-serif;line-height:1.7}h1{font-size:1.4em}h2{font-size:1.2em;margin-top:1.5em}h3{font-size:1.05em}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:6px 10px}th{background:#f5f5f5}</style></head><body>${renderMarkdown(resultMarkdown)}</body></html>`;
+		const blob = new Blob([html], { type: 'application/msword' });
+		downloadBlob(blob, 'meeting-prep-plan.doc');
 	}
 </script>
 
@@ -234,8 +193,8 @@
 							<span class="badge badge-model">{resultModel}</span>
 							<div class="export-buttons">
 								<button class="btn btn-secondary btn-sm" onclick={exportTxt}>TXT</button>
-								<button class="btn btn-secondary btn-sm" onclick={exportDocx}>DOCX</button>
-								<button class="btn btn-secondary btn-sm" onclick={exportPdf}>PDF</button>
+								<button class="btn btn-secondary btn-sm" onclick={exportDoc}>DOC</button>
+								<button class="btn btn-secondary btn-sm" onclick={exportHtml}>HTML</button>
 							</div>
 						</div>
 					</div>
