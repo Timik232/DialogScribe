@@ -32,6 +32,12 @@ router = APIRouter(prefix="/api", tags=["analysis"])
 llm_client = LLMClient()
 
 
+class MeetingPrepRequest(BaseModel):
+    company_data: str
+    catalog_data: str
+    model: str | None = None
+
+
 class SummaryRequest(BaseModel):
     text: str
     model: str | None = None
@@ -193,4 +199,60 @@ def get_models(_user: User = Depends(get_current_user)) -> dict:
         return {"models": [{"id": m, "name": m} for m in models]}
     except Exception as exc:
         logger.exception("Failed to list models")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+MEETING_PREP_SYSTEM_PROMPT = (
+    "Ты — эксперт по подготовке к B2B-встречам. На основе данных о компании-клиенте "
+    "и каталога продуктов/услуг составь детальный план подготовки к встрече на русском языке.\n\n"
+    "Структура ответа:\n"
+    "## Профиль компании\n"
+    "Краткая сводка: отрасль, размер, ключевые факты.\n\n"
+    "## Потенциальные потребности\n"
+    "Какие проблемы/задачи компании могут решить наши продукты. Обоснуй связь.\n\n"
+    "## Рекомендуемые продукты\n"
+    "| Продукт | Потребность клиента | Аргумент |\n"
+    "|---------|---------------------|----------|\n\n"
+    "## Ключевые вопросы для встречи\n"
+    "Список вопросов, которые стоит задать клиенту для квалификации.\n\n"
+    "## Возможные возражения и ответы\n"
+    "- **Возражение**: ... → **Ответ**: ...\n\n"
+    "## Стратегия встречи\n"
+    "Рекомендуемый сценарий: с чего начать, на чём сделать акцент, как завершить.\n\n"
+    "Правила:\n"
+    "- Опирайся только на предоставленные данные, не выдумывай\n"
+    "- Будь конкретен и практичен\n"
+    "- Формат: Markdown"
+)
+
+
+@router.post("/meeting-prep")
+async def post_meeting_prep(
+    body: MeetingPrepRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    _ensure_llm()
+    _maybe_update_model(body.model)
+    await check_limit(db, user.id, "llm_call")
+
+    user_text = (
+        f"## Данные о компании-клиенте\n{body.company_data}\n\n"
+        f"## Каталог наших продуктов/услуг\n{body.catalog_data}"
+    )
+
+    try:
+        markdown = llm_client.call(MEETING_PREP_SYSTEM_PROMPT, user_text)
+        await track_usage(db, user.id, "llm_call", 1.0, {"type": "meeting_prep"})
+        return {
+            "id": uuid.uuid4().hex[:12],
+            "markdown": markdown,
+            "model": llm_client.config.model,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ConnectionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Meeting prep generation failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
