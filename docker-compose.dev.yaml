@@ -6,18 +6,16 @@ services:
     container_name: dialogscribe-dev
     ports:
       - "7860:7860"
+    env_file:
+      - .env.dev
     environment:
-      # Transcription via Mistral Voxtral
-      - MISTRAL_API_KEY=${MISTRAL_API_KEY:-}
-      - ASR_URL=https://api.mistral.ai
-      - ASR_MODEL=voxtral-mini-latest
-      # LLM for summary / insights / chat (Mistral OpenAI-compat)
-      - LLM_API_KEY=${LLM_API_KEY:-}
-      - LLM_BASE_URL=https://api.mistral.ai/v1
-      - LLM_MODEL=mistral-small-latest
-      # Auth
-      - JWT_SECRET=${JWT_SECRET:-dev-secret-change-in-prod}
-      - API_KEY=${API_KEY:-}
+      # Transcription via GigaAM (LiteLLM proxy)
+      - LITELLM_URL=https://litellm.komolov.synology.me
+      - LITELLM_MODEL=gigaamv3-generation
+      # LLM for summary / insights / chat (GigaChat)
+      # GIGACHAT_API_KEY is injected from .env.dev (gitignored — keep secrets out of VCS)
+      - GIGACHAT_SCOPE=GIGACHAT_API_CORP
+      - GIGACHAT_MODEL=GigaChat-Pro
       # Database (SQLite inside container)
       - DATABASE_URL=sqlite+aiosqlite:////app/data/dialogscribe.db
       # Server

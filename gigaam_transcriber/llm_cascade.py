@@ -98,22 +98,26 @@ class LLMCascade:
         advisor_config: Optional[LLMClientConfig] = None,
     ):
         # Classifier client (fast/cheap model)
-        if classifier_config:
-            self._classifier = LLMClient(classifier_config)
-        else:
-            cfg = LLMClientConfig()
-            if DEFAULT_CLASSIFIER_MODEL:
-                cfg.model = DEFAULT_CLASSIFIER_MODEL
-            self._classifier = LLMClient(cfg)
+        self._classifier = self._build_client(classifier_config, DEFAULT_CLASSIFIER_MODEL)
 
         # Advisor client (strong model)
-        if advisor_config:
-            self._advisor = LLMClient(advisor_config)
-        else:
-            cfg = LLMClientConfig()
-            if DEFAULT_ADVISOR_MODEL:
-                cfg.model = DEFAULT_ADVISOR_MODEL
-            self._advisor = LLMClient(cfg)
+        self._advisor = self._build_client(advisor_config, DEFAULT_ADVISOR_MODEL)
+
+    @staticmethod
+    def _build_client(config: Optional[LLMClientConfig], default_model: str):
+        """Build the live-advisor LLM client.
+
+        The Live Advisor deliberately uses the OpenAI-compatible LLMClient
+        (e.g. Mistral via LLM_BASE_URL/LLM_MODEL/LLM_API_KEY), NOT GigaChat —
+        GigaChat produced poor live hints. Summary/insights/chat stay on the
+        global provider via create_llm_client().
+        """
+        if config:
+            return LLMClient(config)
+        cfg = LLMClientConfig()
+        if default_model:
+            cfg.model = default_model
+        return LLMClient(cfg)
 
     def classify(self, fragment: str) -> Optional[ClassificationResult]:
         """Layer 1: Classify a transcript fragment.

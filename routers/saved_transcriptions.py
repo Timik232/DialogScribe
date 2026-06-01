@@ -15,14 +15,14 @@ from gigaam_transcriber.insights import extract_action_items, generate_suggested
 from gigaam_transcriber.limits import check_limit
 from gigaam_transcriber.mindmap import generate_mindmap_markdown
 from gigaam_transcriber.models import SavedTranscription, User
-from gigaam_transcriber.summarizer import LLMClient, generate_summary
+from gigaam_transcriber.summarizer import LLMClient, create_llm_client, generate_summary
 from gigaam_transcriber.usage import track_usage
 
 from routers._helpers import logger
 
 router = APIRouter(prefix="/api", tags=["saved-transcriptions"])
 
-llm_client = LLMClient()
+llm_client = create_llm_client()
 
 
 def _ensure_llm() -> None:

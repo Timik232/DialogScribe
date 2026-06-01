@@ -7,7 +7,7 @@ import tempfile
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from gigaam_transcriber.autoflow import run_autoflow
-from gigaam_transcriber.summarizer import LLMClient, LLMClientConfig
+from gigaam_transcriber.summarizer import LLMClient, LLMClientConfig, create_llm_client
 from gigaam_transcriber.auth import decode_token
 from gigaam_transcriber.database import async_session_factory
 from routers._helpers import SUPPORTED_EXTENSIONS, _map_diarization
@@ -71,10 +71,11 @@ async def autoflow_ws(ws: WebSocket):
         with os.fdopen(fd, "wb") as f:
             f.write(file_bytes)
 
-        llm_config = LLMClientConfig()
-        if model:
-            llm_config.model = model
-        llm_client = LLMClient(llm_config)
+        llm_client = create_llm_client()
+        # Применяем выбор модели только для OpenAI-совместимого клиента;
+        # GigaChat использует свою сконфигурированную модель.
+        if model and isinstance(llm_client, LLMClient):
+            llm_client.config.model = model
 
         transcriber = ws.app.state.transcriber
         user_id: str = payload.get("sub", "")

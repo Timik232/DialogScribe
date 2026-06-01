@@ -9,7 +9,7 @@ import hashlib
 import logging
 from typing import Optional
 
-from gigaam_transcriber.summarizer import LLMClient
+from gigaam_transcriber.summarizer import LLMClient, create_llm_client
 from gigaam_transcriber.context_utils import (
     estimate_tokens,
     find_relevant_chunks,
@@ -141,7 +141,7 @@ def chat_with_transcript(
     For long transcripts, uses compressed context (chunk summaries + relevant chunks).
     """
     if llm_client is None:
-        llm_client = LLMClient()
+        llm_client = create_llm_client()
 
     if model and model != llm_client.config.model:
         llm_client.update_config(

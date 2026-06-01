@@ -6,7 +6,7 @@ from gigaam_transcriber.auth import get_current_user
 from gigaam_transcriber.database import get_db
 from gigaam_transcriber.limits import check_limit
 from gigaam_transcriber.models import User
-from gigaam_transcriber.summarizer import LLMClient
+from gigaam_transcriber.summarizer import LLMClient, create_llm_client
 from gigaam_transcriber.usage import track_usage
 from gigaam_transcriber.meeting_prep.schemas import MeetingPrepRequest, MeetingPrepResponse
 from gigaam_transcriber.meeting_prep.service import generate_meeting_prep
@@ -14,7 +14,7 @@ from routers._helpers import logger
 
 router = APIRouter(prefix="/api", tags=["meeting-prep"])
 
-llm_client = LLMClient()
+llm_client = create_llm_client()
 
 
 def _ensure_llm() -> None:

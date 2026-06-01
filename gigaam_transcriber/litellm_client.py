@@ -25,10 +25,15 @@ class LiteLLMASRClient(ASRProviderBase):
         self._base_url = os.getenv("LITELLM_URL", _DEFAULT_URL).rstrip("/")
         self._model = os.getenv("LITELLM_MODEL", _DEFAULT_MODEL)
         self._api_key = os.getenv("LITELLM_API_KEY", os.getenv("LLM_API_KEY", ""))
-        self._client = httpx.AsyncClient(timeout=300.0)
+        self._timeout = 300.0
 
     async def close(self) -> None:
-        await self._client.aclose()
+        # No persistent client to close: each request opens its own
+        # httpx.AsyncClient bound to the currently-running event loop.
+        # The transcriber drives ASR via repeated asyncio.run() calls
+        # (each creating and then closing a fresh loop), so a client held
+        # across calls would raise "Event loop is closed" on reuse.
+        return None
 
     async def _post_transcription(
         self,
@@ -43,10 +48,14 @@ class LiteLLMASRClient(ASRProviderBase):
 
         for attempt in range(_MAX_RETRIES + 1):
             try:
-                response = await self._client.post(
-                    url, headers=headers, files=files, data=data,
-                )
-                response.raise_for_status()
+                # Fresh client per attempt — binds to the current event loop.
+                async with httpx.AsyncClient(timeout=self._timeout) as client:
+                    response = await client.post(
+                        url, headers=headers, files=files, data=data,
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                return payload.get("text", "") or ""
             except httpx.TimeoutException as exc:
                 if attempt == _MAX_RETRIES:
                     raise ASRError(
@@ -84,9 +93,6 @@ class LiteLLMASRClient(ASRProviderBase):
                 )
                 await asyncio.sleep(backoff)
                 continue
-
-            payload = response.json()
-            return payload.get("text", "") or ""
 
         raise ASRError("LiteLLM ASR: exhausted retries")
 

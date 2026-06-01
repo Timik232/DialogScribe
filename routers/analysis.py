@@ -17,6 +17,7 @@ from gigaam_transcriber.insights import (
 )
 from gigaam_transcriber.summarizer import (
     LLMClient,
+    create_llm_client,
     generate_summary,
     get_available_models,
     summary_to_html,
@@ -29,7 +30,7 @@ from routers._helpers import logger
 
 router = APIRouter(prefix="/api", tags=["analysis"])
 
-llm_client = LLMClient()
+llm_client = create_llm_client()
 
 
 class SummaryRequest(BaseModel):

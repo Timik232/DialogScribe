@@ -15,6 +15,13 @@ from typing import TYPE_CHECKING, Optional
 import markdown as md_lib
 from openai import OpenAI, APIError, APIConnectionError, RateLimitError, AuthenticationError
 
+try:
+    from gigachat import GigaChat as GigaChatSDK
+    from gigachat.models import Chat, Messages, MessagesRole
+    HAS_GIGACHAT = True
+except ImportError:
+    HAS_GIGACHAT = False
+
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -306,6 +313,90 @@ class LLMClient:
             return False, f"Ошибка API: {e}"
         except Exception as e:
             return False, f"Неизвестная ошибка: {e}"
+
+
+class GigaChatLLMClient:
+    """LLM-клиент для GigaChat API (Sber)."""
+
+    def __init__(self, credentials: str = "", scope: str = "GIGACHAT_API_CORP",
+                 model: str = "GigaChat-Pro"):
+        self._credentials = credentials or os.getenv("GIGACHAT_API_KEY", "")
+        self._scope = scope or os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_CORP")
+        self._model = model or os.getenv("GIGACHAT_MODEL", "GigaChat-Pro")
+        # Дефолтный таймаут httpx в gigachat SDK слишком мал для начального
+        # TLS handshake + OAuth — увеличиваем, иначе ConnectTimeout.
+        self._timeout = float(os.getenv("GIGACHAT_TIMEOUT", "60"))
+        self._client = None
+
+    @property
+    def config(self) -> LLMClientConfig:
+        return LLMClientConfig(
+            base_url="gigachat",
+            api_key=self._credentials,
+            model=self._model,
+        )
+
+    def _get_client(self):
+        if self._client is None:
+            if not HAS_GIGACHAT:
+                raise ImportError("Пакет 'gigachat' не установлен: pip install gigachat")
+            if not self._credentials:
+                raise ValueError("GIGACHAT_API_KEY не задан")
+            self._client = GigaChatSDK(
+                credentials=self._credentials,
+                scope=self._scope,
+                model=self._model,
+                verify_ssl_certs=False,
+                timeout=self._timeout,
+            )
+        return self._client
+
+    def update_config(self, base_url: str, api_key: str, model: str) -> None:
+        self._credentials = api_key
+        self._model = model or "GigaChat-Pro"
+        self._client = None
+
+    def call(self, system_prompt: str, user_text: str, max_tokens: int = 4096) -> str:
+        client = self._get_client()
+        try:
+            payload = Chat(
+                messages=[
+                    Messages(role=MessagesRole.SYSTEM, content=system_prompt),
+                    Messages(role=MessagesRole.USER, content=user_text),
+                ],
+                max_tokens=max_tokens,
+                temperature=0.3,
+            )
+            response = client.chat(payload)
+            return response.choices[0].message.content or ""
+        except Exception as e:
+            raise RuntimeError(f"GigaChat error: {e}") from e
+
+    def test_connection(self) -> tuple[bool, str]:
+        if not self._credentials:
+            return False, "GIGACHAT_API_KEY не задан"
+        try:
+            client = self._get_client()
+            payload = Chat(
+                messages=[Messages(role=MessagesRole.USER, content="Hi")],
+                max_tokens=5,
+            )
+            response = client.chat(payload)
+            if response.choices:
+                return True, f"GigaChat подключён (модель: {self._model})"
+            return False, "Пустой ответ"
+        except Exception as e:
+            return False, f"Ошибка GigaChat: {e}"
+
+
+def create_llm_client() -> LLMClient | GigaChatLLMClient:
+    """Создать LLM-клиент на основе env-конфигурации."""
+    gigachat_key = os.getenv("GIGACHAT_API_KEY", "")
+    if gigachat_key and HAS_GIGACHAT:
+        logger.info("LLM provider: GigaChat")
+        return GigaChatLLMClient(credentials=gigachat_key)
+    logger.info("LLM provider: OpenAI-compatible (%s)", _default_base_url())
+    return LLMClient()
 
 
 # ---------------------------------------------------------------------------
