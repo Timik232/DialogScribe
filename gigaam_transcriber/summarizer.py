@@ -205,6 +205,7 @@ class LLMClientConfig:
     base_url: str = field(default_factory=_default_base_url)
     api_key: str = field(default_factory=_default_api_key)
     model: str = field(default_factory=_default_model)
+    max_retries: int = 3
 
 
 class LLMClient:
@@ -212,6 +213,7 @@ class LLMClient:
 
     def __init__(self, config: Optional[LLMClientConfig] = None):
         self._config = config or LLMClientConfig()
+        self._max_retries = self._config.max_retries
         self._client: Optional[OpenAI] = None
 
     @property
@@ -241,7 +243,7 @@ class LLMClient:
 
     def call(self, system_prompt: str, user_text: str, max_tokens: int = 4096) -> str:
         """
-        Вызов LLM API с обработкой ошибок.
+        Вызов LLM API с обработкой ошибок и retry.
 
         Args:
             system_prompt: Системный промпт
@@ -269,60 +271,92 @@ class LLMClient:
             len(messages),
         )
 
-        t0 = time.time()
-        try:
-            response = client.chat.completions.create(
-                model=self._config.model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=0.3,
-            )
-            latency_ms = (time.time() - t0) * 1000
-            logger.info(
-                "LLM call completed | model=%s | input_tokens=%d | output_tokens=%d | latency_ms=%.0f | status=success",
-                self._config.model,
-                response.usage.prompt_tokens,
-                response.usage.completion_tokens,
-                latency_ms,
-            )
-            return response.choices[0].message.content or ""
+        last_exc: Exception | None = None
+        for attempt in range(self._max_retries + 1):
+            t0 = time.time()
+            try:
+                response = client.chat.completions.create(
+                    model=self._config.model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=0.3,
+                )
+                latency_ms = (time.time() - t0) * 1000
+                logger.info(
+                    "LLM call completed | model=%s | input_tokens=%d | output_tokens=%d | latency_ms=%.0f | status=success",
+                    self._config.model,
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens,
+                    latency_ms,
+                )
+                return response.choices[0].message.content or ""
 
-        except AuthenticationError as e:
-            latency_ms = (time.time() - t0) * 1000
-            logger.error(
-                "LLM call failed | model=%s | error_type=%s | latency_ms=%.0f | status=error",
-                self._config.model,
-                type(e).__name__,
-                latency_ms,
-            )
-            raise ValueError(f"Ошибка авторизации: {e}") from e
-        except RateLimitError as e:
-            latency_ms = (time.time() - t0) * 1000
-            logger.error(
-                "LLM call failed | model=%s | error_type=%s | latency_ms=%.0f | status=error",
-                self._config.model,
-                type(e).__name__,
-                latency_ms,
-            )
-            raise RuntimeError(f"Превышен лимит запросов: {e}") from e
-        except APIConnectionError as e:
-            latency_ms = (time.time() - t0) * 1000
-            logger.error(
-                "LLM call failed | model=%s | error_type=%s | latency_ms=%.0f | status=error",
-                self._config.model,
-                type(e).__name__,
-                latency_ms,
-            )
-            raise ConnectionError(f"Не удалось подключиться к {self._config.base_url}: {e}") from e
-        except APIError as e:
-            latency_ms = (time.time() - t0) * 1000
-            logger.error(
-                "LLM call failed | model=%s | error_type=%s | latency_ms=%.0f | status=error",
-                self._config.model,
-                type(e).__name__,
-                latency_ms,
-            )
-            raise RuntimeError(f"Ошибка API: {e}") from e
+            except AuthenticationError as e:
+                latency_ms = (time.time() - t0) * 1000
+                logger.error(
+                    "LLM call failed | model=%s | error_type=%s | latency_ms=%.0f | status=error",
+                    self._config.model,
+                    type(e).__name__,
+                    latency_ms,
+                )
+                raise ValueError(f"Ошибка авторизации: {e}") from e
+
+            except (RateLimitError, APIConnectionError) as e:
+                last_exc = e
+                if attempt < self._max_retries:
+                    backoff = float(2 ** attempt)
+                    logger.warning(
+                        "LLM call retry | model=%s | attempt=%d/%d | error_type=%s | backoff=%.1fs",
+                        self._config.model,
+                        attempt + 1,
+                        self._max_retries,
+                        type(e).__name__,
+                        backoff,
+                    )
+                    time.sleep(backoff)
+                    continue
+                latency_ms = (time.time() - t0) * 1000
+                logger.error(
+                    "LLM call failed | model=%s | error_type=%s | latency_ms=%.0f | status=error",
+                    self._config.model,
+                    type(e).__name__,
+                    latency_ms,
+                )
+
+            except APIError as e:
+                status = getattr(e, "status_code", None)
+                if status is not None and status >= 500 and attempt < self._max_retries:
+                    last_exc = e
+                    backoff = float(2 ** attempt)
+                    logger.warning(
+                        "LLM call retry | model=%s | attempt=%d/%d | error_type=%s | backoff=%.1fs",
+                        self._config.model,
+                        attempt + 1,
+                        self._max_retries,
+                        type(e).__name__,
+                        backoff,
+                    )
+                    time.sleep(backoff)
+                    continue
+                latency_ms = (time.time() - t0) * 1000
+                logger.error(
+                    "LLM call failed | model=%s | error_type=%s | latency_ms=%.0f | status=error",
+                    self._config.model,
+                    type(e).__name__,
+                    latency_ms,
+                )
+                if status is not None and status >= 500:
+                    last_exc = e
+                    continue
+                raise RuntimeError(f"Ошибка API: {e}") from e
+
+        if last_exc is None:
+            raise RuntimeError("LLM call failed unexpectedly")
+        if isinstance(last_exc, RateLimitError):
+            raise RuntimeError(f"Превышен лимит запросов: {last_exc}") from last_exc
+        if isinstance(last_exc, APIConnectionError):
+            raise ConnectionError(f"Не удалось подключиться к {self._config.base_url}: {last_exc}") from last_exc
+        raise RuntimeError(f"Ошибка API: {last_exc}") from last_exc
 
     def test_connection(self) -> tuple[bool, str]:
         """

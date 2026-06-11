@@ -9,6 +9,8 @@ import logging
 import re
 from typing import Optional
 
+import tiktoken
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -94,6 +96,35 @@ def estimate_tokens(text: str) -> int:
     return int(total) if total > 0 else 0
 
 
+def estimate_tokens_accurate(text: str, model: str) -> int:
+    """Оценка токенов через tiktoken с каскадным fallback.
+
+    1. tiktoken.encoding_for_model(model) — точная токенизация
+    2. tiktoken.get_encoding("cl100k_base") — универсальный fallback
+    3. estimate_tokens(text) — эвристика по символам
+
+    Добавляет 10% safety margin к результату tiktoken.
+    """
+    if not text:
+        return 0
+
+    try:
+        encoding = tiktoken.encoding_for_model(model)
+        count = len(encoding.encode(text))
+        return int(count * 1.1)
+    except KeyError:
+        pass
+
+    try:
+        encoding = tiktoken.get_encoding("cl100k_base")
+        count = len(encoding.encode(text))
+        return int(count * 1.1)
+    except Exception:
+        pass
+
+    return estimate_tokens(text)
+
+
 # ---------------------------------------------------------------------------
 # Лимит контекста модели
 # ---------------------------------------------------------------------------
@@ -132,6 +163,7 @@ def get_context_budget(
     system_prompt: str,
     text: str,
     history: Optional[list[dict]] = None,
+    max_tokens: Optional[int] = None,
 ) -> dict:
     """Рассчитать доступный контекстный бюджет.
 
@@ -140,6 +172,7 @@ def get_context_budget(
         system_prompt: Системный промпт.
         text: Основной текст (транскрипция).
         history: История сообщений чата (опционально).
+        max_tokens: Максимальные выходные токены модели (опционально).
 
     Returns:
         Dict с ключами:
@@ -147,6 +180,7 @@ def get_context_budget(
         - used_prompt: токены system_prompt
         - used_text: токены text
         - used_history: токены history
+        - output_reserve: зарезервированные токены для ответа
         - available: доступные токены
         - needs_compression: bool (True если used >= 50% от total)
     """
@@ -158,14 +192,20 @@ def get_context_budget(
         for msg in history:
             used_history += estimate_tokens(msg.get("content", ""))
 
+    output_reserve = min(
+        max_tokens if max_tokens is not None else int(total * 0.2),
+        int(total * 0.3),
+    )
+
     used = used_prompt + used_text + used_history
-    available = max(0, total - used)
+    available = max(0, total - used - output_reserve)
 
     return {
         "total": total,
         "used_prompt": used_prompt,
         "used_text": used_text,
         "used_history": used_history,
+        "output_reserve": output_reserve,
         "available": available,
         "needs_compression": used >= total * 0.5,
     }
