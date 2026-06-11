@@ -12,6 +12,7 @@ from typing import Optional
 from gigaam_transcriber.summarizer import LLMClient
 from gigaam_transcriber.context_utils import (
     estimate_tokens,
+    estimate_tokens_accurate,
     find_relevant_chunks,
     get_context_budget,
     get_model_context_limit,
@@ -94,6 +95,7 @@ def _build_compressed_context(
     chunk_summaries: list[dict],
     query: str,
     max_tokens: int = 30000,
+    model: Optional[str] = None,
 ) -> str:
     """Build compressed context from chunk summaries + relevant chunks."""
     parts: list[str] = []
@@ -103,7 +105,7 @@ def _build_compressed_context(
     overview_parts: list[str] = []
     for cs in chunk_summaries:
         line = f"[Часть {cs['index'] + 1}] {cs['summary']}"
-        line_tokens = estimate_tokens(line)
+        line_tokens = estimate_tokens_accurate(line, model) if model else estimate_tokens(line)
         if used_tokens + line_tokens > max_tokens // 2:
             break
         overview_parts.append(line)
@@ -117,7 +119,7 @@ def _build_compressed_context(
         if relevant:
             parts.append("\n\nРЕЛЕВАНТНЫЕ ФРАГМЕНТЫ:\n")
             for j, r in enumerate(relevant):
-                r_tokens = estimate_tokens(r)
+                r_tokens = estimate_tokens_accurate(r, model) if model else estimate_tokens(r)
                 if used_tokens + r_tokens > max_tokens:
                     break
                 parts.append(f"\n--- Фрагмент {j + 1} ---\n{r}\n")
@@ -197,7 +199,7 @@ def _get_compressed_transcript(
     query = latest_message.get("content", "") if latest_message else ""
     max_ctx = min(budget["total"] // 2, 60000)
 
-    return _build_compressed_context(summaries, query, max_tokens=max_ctx)
+    return _build_compressed_context(summaries, query, max_tokens=max_ctx, model=model)
 
 
 def _truncate_history(
@@ -207,8 +209,8 @@ def _truncate_history(
 ) -> list[dict]:
     """Truncate conversation history to fit within token budget."""
     max_context = get_model_context_limit(model)
-    transcript_tokens = estimate_tokens(transcript_content)
-    system_tokens = estimate_tokens(CHAT_SYSTEM_PROMPT)
+    transcript_tokens = estimate_tokens_accurate(transcript_content, model)
+    system_tokens = estimate_tokens_accurate(CHAT_SYSTEM_PROMPT, model)
     budget = max_context - transcript_tokens - system_tokens - 4096  # reserve for output
 
     if budget <= 0:
@@ -217,7 +219,7 @@ def _truncate_history(
     kept: list[dict] = []
     used = 0
     for msg in reversed(messages):
-        msg_tokens = estimate_tokens(msg.get("content", ""))
+        msg_tokens = estimate_tokens_accurate(msg.get("content", ""), model)
         if used + msg_tokens > budget or len(kept) >= 10:
             break
         kept.insert(0, msg)

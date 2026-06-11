@@ -3,9 +3,19 @@
 
 Вызывает LLM для анализа данных о компании и каталога продуктов,
 формирует структурированный отчёт на русском языке.
+Поддерживает map-reduce для длинных текстов.
 """
 
 import asyncio
+import logging
+
+from ..context_utils import (
+    estimate_tokens_accurate,
+    get_context_budget,
+    split_into_chunks,
+)
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
     "Ты — опытный менеджер по продажам и бизнес-аналитик. "
@@ -101,6 +111,63 @@ SYSTEM_PROMPT = (
     "- Секция «План встречи» должна быть практической, а не абстрактной"
 )
 
+MAP_PROMPT = (
+    "Проанализируй следующую часть данных о компании. "
+    "Выдели: профиль, контакты, история взаимодействия, контекст и сигналы. "
+    "Формат: структурированный текст на русском языке."
+)
+
+OUTPUT_TOKENS = 16384
+
+
+def _hierarchical_reduce(
+    chunk_summaries: list[str],
+    reduce_prompt: str,
+    llm_client,
+    model: str | None = None,
+    max_depth: int = 2,
+) -> str:
+    effective_model = model or llm_client.config.model
+    combined = "\n\n---\n\n".join(chunk_summaries)
+    budget = get_context_budget(effective_model, reduce_prompt, combined, max_tokens=OUTPUT_TOKENS)
+
+    if budget["available"] >= estimate_tokens_accurate(combined, effective_model):
+        logger.info(
+            "Meeting prep reduce: %d chunks, %d tokens, strategy=simple",
+            len(chunk_summaries), budget["used_text"],
+        )
+        return llm_client.call(reduce_prompt, combined, OUTPUT_TOKENS, model_override=model)
+
+    if max_depth <= 0:
+        raise ValueError(
+            f"Text too long for context: {budget['used_text']} tokens needed, "
+            f"{budget['available']} available (model={effective_model}, limit={budget['total']})"
+        )
+
+    logger.info(
+        "Meeting prep reduce: %d chunks, %d tokens, strategy=hierarchical (depth=%d)",
+        len(chunk_summaries), budget["used_text"], max_depth,
+    )
+
+    prompt_tokens = estimate_tokens_accurate(reduce_prompt, effective_model)
+    available_per_group = budget["total"] - prompt_tokens - budget["output_reserve"]
+
+    summaries_per_group = 1
+    for size in range(len(chunk_summaries), 0, -1):
+        test_combined = "\n\n---\n\n".join(chunk_summaries[:size])
+        if estimate_tokens_accurate(test_combined, effective_model) <= available_per_group:
+            summaries_per_group = size
+            break
+
+    sub_results: list[str] = []
+    for i in range(0, len(chunk_summaries), summaries_per_group):
+        group = chunk_summaries[i : i + summaries_per_group]
+        group_combined = "\n\n---\n\n".join(group)
+        sub_result = llm_client.call(reduce_prompt, group_combined, OUTPUT_TOKENS, model_override=model)
+        sub_results.append(sub_result)
+
+    return _hierarchical_reduce(sub_results, reduce_prompt, llm_client, model, max_depth - 1)
+
 
 async def generate_meeting_prep(
     company_data: str,
@@ -125,30 +192,59 @@ async def generate_meeting_prep(
         ValueError: LLM вернул пустой результат.
         ConnectionError: Ошибка подключения к API.
     """
+    effective_model = model_override or llm_client.config.model
+
     user_message = (
         f"<company-data>\n{company_data}\n</company-data>\n\n"
         f"<catalog-data>\n{catalog_data}\n</catalog-data>"
     )
 
-    original_model = llm_client.config.model
-    effective_model = model_override or original_model
+    budget = get_context_budget(effective_model, SYSTEM_PROMPT, user_message, max_tokens=OUTPUT_TOKENS)
+    data_tokens = estimate_tokens_accurate(user_message, effective_model)
 
-    if model_override:
-        llm_client.update_config(
-            llm_client.config.base_url,
-            llm_client.config.api_key,
-            model_override,
+    if data_tokens <= budget["available"]:
+        logger.info(
+            "Meeting prep: %d tokens, strategy=single",
+            data_tokens,
+        )
+        result = await asyncio.to_thread(
+            llm_client.call, SYSTEM_PROMPT, user_message, OUTPUT_TOKENS,
+            model_override=model_override,
+        )
+    else:
+        chunks = split_into_chunks(
+            company_data,
+            max_tokens=min(3000, budget["available"] // 2),
+            model=effective_model,
+        )
+        logger.info(
+            "Meeting prep: %d tokens, %d chunks, strategy=map-reduce",
+            data_tokens, len(chunks),
         )
 
-    try:
-        result = await asyncio.to_thread(llm_client.call, SYSTEM_PROMPT, user_message, 16384)
-    finally:
-        if model_override:
-            llm_client.update_config(
-                llm_client.config.base_url,
-                llm_client.config.api_key,
-                original_model,
+        chunk_summaries: list[str] = []
+        for i, chunk in enumerate(chunks):
+            chunk_message = (
+                f"<company-data-part index=\"{i + 1}/{len(chunks)}\">\n{chunk}\n</company-data-part>"
             )
+            summary = await asyncio.to_thread(
+                llm_client.call, MAP_PROMPT, chunk_message, 4096,
+                model_override=model_override,
+            )
+            chunk_summaries.append(summary)
+
+        combined_summaries = "\n\n---\n\n".join(chunk_summaries)
+        reduce_message = (
+            f"АНАЛИЗ ДАННЫХ О КОМПАНИИ:\n{combined_summaries}\n\n"
+            f"КАТАЛОГ ПРОДУКТОВ:\n{catalog_data}"
+        )
+        result = await asyncio.to_thread(
+            _hierarchical_reduce,
+            chunk_summaries,
+            SYSTEM_PROMPT,
+            llm_client,
+            model=effective_model,
+        )
 
     if not result or not result.strip():
         raise ValueError("LLM вернул пустой результат")

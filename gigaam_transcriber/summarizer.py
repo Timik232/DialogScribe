@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 from gigaam_transcriber.context_utils import (
     estimate_tokens,
+    estimate_tokens_accurate,
     get_context_budget,
     get_model_context_limit,
     split_into_chunks,
@@ -285,7 +286,7 @@ class LLMClient:
         logger.info(
             "LLM call starting | model=%s | estimated_input_tokens=%d | messages=%d",
             effective_model,
-            estimate_tokens(system_prompt + user_text),
+            estimate_tokens_accurate(system_prompt + user_text, effective_model),
             len(messages),
         )
 
@@ -440,7 +441,7 @@ def _hierarchical_reduce(
     combined = "\n\n---\n\n".join(chunk_summaries)
     budget = get_context_budget(effective_model, reduce_prompt, combined)
 
-    if budget["available"] >= estimate_tokens(combined):
+    if budget["available"] >= estimate_tokens_accurate(combined, effective_model):
         logger.info(
             "Reduce: %d chunks, %d tokens, strategy=simple",
             len(chunk_summaries),
@@ -461,13 +462,13 @@ def _hierarchical_reduce(
         max_depth,
     )
 
-    prompt_tokens = estimate_tokens(reduce_prompt)
+    prompt_tokens = estimate_tokens_accurate(reduce_prompt, effective_model)
     available_per_group = budget["total"] - prompt_tokens - budget["output_reserve"]
 
     summaries_per_group = 1
     for size in range(len(chunk_summaries), 0, -1):
         test_combined = "\n\n---\n\n".join(chunk_summaries[:size])
-        if estimate_tokens(test_combined) <= available_per_group:
+        if estimate_tokens_accurate(test_combined, effective_model) <= available_per_group:
             summaries_per_group = size
             break
 

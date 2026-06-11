@@ -10,8 +10,9 @@ import logging
 import os
 import re
 import tempfile
+from typing import Optional
 
-from .context_utils import estimate_tokens
+from .context_utils import estimate_tokens, estimate_tokens_accurate
 from .exceptions import ASRError
 from .asr_provider import get_asr_provider
 from .summarizer import LLMClient
@@ -221,7 +222,7 @@ def generate_hints(
     template = HINT_TEMPLATES[template_key]
 
     full_text = f"{context_text}\n\n{transcript}" if context_text else transcript
-    full_text = truncate_to_window(full_text)
+    full_text = truncate_to_window(full_text, model=llm_client.config.model)
 
     arg_response = llm_client.call(template["argumentative_prompt"], full_text, max_tokens=1000)
     nav_response = llm_client.call(template["navigational_prompt"], full_text, max_tokens=1000)
@@ -248,7 +249,7 @@ def _normalize_hint(item: dict[str, object]) -> dict[str, str]:
     return hint
 
 
-def truncate_to_window(text: str, max_tokens: int = CONTEXT_WINDOW_TOKENS) -> str:
+def truncate_to_window(text: str, max_tokens: int = CONTEXT_WINDOW_TOKENS, model: Optional[str] = None) -> str:
     """Truncate transcript to fit within max_tokens, keeping the most recent text.
 
     Uses a sliding window approach: if the text exceeds the token limit,
@@ -257,23 +258,26 @@ def truncate_to_window(text: str, max_tokens: int = CONTEXT_WINDOW_TOKENS) -> st
     Args:
         text: Full transcript text.
         max_tokens: Maximum allowed token count.
+        model: Optional model name for accurate token estimation.
 
     Returns:
         Truncated text that fits within the token budget.
     """
-    if estimate_tokens(text) <= max_tokens:
+    _estimate = lambda t: estimate_tokens_accurate(t, model) if model else estimate_tokens(t)
+
+    if _estimate(text) <= max_tokens:
         return text
 
     words = text.split()
     kept: list[str] = []
     for word in reversed(words):
         kept.append(word)
-        if estimate_tokens(" ".join(reversed(kept))) > max_tokens:
+        if _estimate(" ".join(reversed(kept))) > max_tokens:
             kept.pop()
             break
 
     result = " ".join(reversed(kept))
-    logger.debug("Truncated transcript from %d to %d tokens", estimate_tokens(text), estimate_tokens(result))
+    logger.debug("Truncated transcript from %d to %d tokens", _estimate(text), _estimate(result))
     return result
 
 

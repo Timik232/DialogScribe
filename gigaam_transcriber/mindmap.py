@@ -17,6 +17,7 @@ from typing import Optional
 from gigaam_transcriber.summarizer import LLMClient
 from gigaam_transcriber.context_utils import (
     estimate_tokens,
+    estimate_tokens_accurate,
     get_context_budget,
     split_into_chunks,
 )
@@ -1091,7 +1092,7 @@ def _generate_mindmap_map_reduce(text: str, llm_client: LLMClient, budget: dict,
         effective_model, MINDMAP_REDUCE_PROMPT, combined,
     )
 
-    if budget_check["available"] >= estimate_tokens(combined):
+    if budget_check["available"] >= estimate_tokens_accurate(combined, effective_model):
         logger.info(
             "Mindmap reduce: %d subtrees, %d tokens, strategy=simple",
             len(subtrees),
@@ -1108,13 +1109,13 @@ def _generate_mindmap_map_reduce(text: str, llm_client: LLMClient, budget: dict,
         len(subtrees),
         budget_check["used_text"],
     )
-    prompt_tokens = estimate_tokens(MINDMAP_REDUCE_PROMPT)
+    prompt_tokens = estimate_tokens_accurate(MINDMAP_REDUCE_PROMPT, effective_model)
     available_per_group = budget_check["total"] - prompt_tokens - budget_check["output_reserve"]
 
     subtrees_per_group = 1
     for size in range(len(subtrees), 0, -1):
         test_combined = "\n\n---\n\n".join(subtrees[:size])
-        if estimate_tokens(test_combined) <= available_per_group:
+        if estimate_tokens_accurate(test_combined, effective_model) <= available_per_group:
             subtrees_per_group = size
             break
 
@@ -1136,7 +1137,7 @@ def _generate_mindmap_map_reduce(text: str, llm_client: LLMClient, budget: dict,
     final_check = get_context_budget(
         effective_model, MINDMAP_REDUCE_PROMPT, final_combined,
     )
-    if final_check["available"] >= estimate_tokens(final_combined):
+    if final_check["available"] >= estimate_tokens_accurate(final_combined, effective_model):
         try:
             return llm_client.call(MINDMAP_REDUCE_PROMPT, final_combined, max_tokens=4096, model_override=model)
         except Exception as e:

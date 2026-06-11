@@ -13,6 +13,7 @@ from typing import Optional
 from gigaam_transcriber.summarizer import LLMClient
 from gigaam_transcriber.context_utils import (
     estimate_tokens,
+    estimate_tokens_accurate,
     get_context_budget,
     get_model_context_limit,
     split_into_chunks,
@@ -206,7 +207,7 @@ def _extract_action_items_map_reduce(text: str, llm_client: LLMClient, budget: d
         effective_model, ACTION_ITEMS_REDUCE_PROMPT, combined,
     )
 
-    if budget_check["available"] >= estimate_tokens(combined):
+    if budget_check["available"] >= estimate_tokens_accurate(combined, effective_model):
         logger.info(
             "Action items reduce: %d chunks, %d tokens, strategy=simple",
             len(all_raw_items),
@@ -224,13 +225,13 @@ def _extract_action_items_map_reduce(text: str, llm_client: LLMClient, budget: d
         len(all_raw_items),
         budget_check["used_text"],
     )
-    prompt_tokens = estimate_tokens(ACTION_ITEMS_REDUCE_PROMPT)
+    prompt_tokens = estimate_tokens_accurate(ACTION_ITEMS_REDUCE_PROMPT, effective_model)
     available_per_group = budget_check["total"] - prompt_tokens - budget_check["output_reserve"]
 
     items_per_group = 1
     for size in range(len(all_raw_items), 0, -1):
         test_combined = "\n\n---\n\n".join(all_raw_items[:size])
-        if estimate_tokens(test_combined) <= available_per_group:
+        if estimate_tokens_accurate(test_combined, effective_model) <= available_per_group:
             items_per_group = size
             break
 
@@ -252,7 +253,7 @@ def _extract_action_items_map_reduce(text: str, llm_client: LLMClient, budget: d
     final_check = get_context_budget(
         effective_model, ACTION_ITEMS_REDUCE_PROMPT, final_combined,
     )
-    if final_check["available"] >= estimate_tokens(final_combined):
+    if final_check["available"] >= estimate_tokens_accurate(final_combined, effective_model):
         try:
             reduced = llm_client.call(ACTION_ITEMS_REDUCE_PROMPT, final_combined, model_override=model)
         except Exception as e:
@@ -351,7 +352,7 @@ def _generate_steps_map_reduce(text: str, llm_client: LLMClient, budget: dict, m
         effective_model, SUGGESTED_STEPS_REDUCE_PROMPT, combined,
     )
 
-    if budget_check["available"] >= estimate_tokens(combined):
+    if budget_check["available"] >= estimate_tokens_accurate(combined, effective_model):
         logger.info(
             "Steps reduce: %d chunks, %d tokens, strategy=simple",
             len(all_raw_steps),
@@ -369,13 +370,13 @@ def _generate_steps_map_reduce(text: str, llm_client: LLMClient, budget: dict, m
         len(all_raw_steps),
         budget_check["used_text"],
     )
-    prompt_tokens = estimate_tokens(SUGGESTED_STEPS_REDUCE_PROMPT)
+    prompt_tokens = estimate_tokens_accurate(SUGGESTED_STEPS_REDUCE_PROMPT, effective_model)
     available_per_group = budget_check["total"] - prompt_tokens - budget_check["output_reserve"]
 
     steps_per_group = 1
     for size in range(len(all_raw_steps), 0, -1):
         test_combined = "\n\n---\n\n".join(all_raw_steps[:size])
-        if estimate_tokens(test_combined) <= available_per_group:
+        if estimate_tokens_accurate(test_combined, effective_model) <= available_per_group:
             steps_per_group = size
             break
 
@@ -397,7 +398,7 @@ def _generate_steps_map_reduce(text: str, llm_client: LLMClient, budget: dict, m
     final_check = get_context_budget(
         effective_model, SUGGESTED_STEPS_REDUCE_PROMPT, final_combined,
     )
-    if final_check["available"] >= estimate_tokens(final_combined):
+    if final_check["available"] >= estimate_tokens_accurate(final_combined, effective_model):
         try:
             reduced = llm_client.call(SUGGESTED_STEPS_REDUCE_PROMPT, final_combined, model_override=model)
         except Exception as e:

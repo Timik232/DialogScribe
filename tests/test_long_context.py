@@ -28,7 +28,7 @@ def _make_long_text(n_sentences=1200):
 
 
 def _make_llm_client(responses=None):
-    config = LLMClientConfig(api_key="sk-test", model="gpt-4o-mini")
+    config = LLMClientConfig(api_key="sk-test", model="gpt-4")
     client = LLMClient(config)
     mock_openai = MagicMock()
 

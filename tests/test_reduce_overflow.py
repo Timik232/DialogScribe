@@ -169,7 +169,7 @@ class TestHierarchicalReduce:
 
         def side_effect(**kwargs):
             call_count[0] += 1
-            return _mock_response(f"# Topic\n## Branch {call_count[0]}\n- detail\n" * 50)
+            return _mock_response(f"# Topic\n## Branch {call_count[0]}\n- detail\n" * 20)
 
         mock_openai.chat.completions.create.side_effect = side_effect
 

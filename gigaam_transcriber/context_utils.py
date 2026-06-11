@@ -185,12 +185,12 @@ def get_context_budget(
         - needs_compression: bool (True если used >= 50% от total)
     """
     total = get_model_context_limit(model)
-    used_prompt = estimate_tokens(system_prompt)
-    used_text = estimate_tokens(text)
+    used_prompt = estimate_tokens_accurate(system_prompt, model) if model else estimate_tokens(system_prompt)
+    used_text = estimate_tokens_accurate(text, model) if model else estimate_tokens(text)
     used_history = 0
     if history:
         for msg in history:
-            used_history += estimate_tokens(msg.get("content", ""))
+            used_history += estimate_tokens_accurate(msg.get("content", ""), model) if model else estimate_tokens(msg.get("content", ""))
 
     output_reserve = min(
         max_tokens if max_tokens is not None else int(total * 0.2),
