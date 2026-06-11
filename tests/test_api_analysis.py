@@ -63,7 +63,7 @@ class TestSummary:
             )
 
         assert resp.status_code == 200
-        mock_llm.update_config.assert_called_once()
+        mock_llm.update_config.assert_not_called()
 
     def test_llm_not_configured(self, client):
         mock_llm = _mock_llm(api_key="")
@@ -349,7 +349,7 @@ class TestChat:
             )
 
         assert resp.status_code == 200
-        mock_llm.update_config.assert_called_once()
+        mock_llm.update_config.assert_not_called()
 
     def test_chat_llm_not_configured(self, client):
         mock_llm = _mock_llm(api_key="")

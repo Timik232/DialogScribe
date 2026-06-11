@@ -12,8 +12,11 @@ import logging
 import json
 import re
 import uuid
+from typing import Optional
+
 from gigaam_transcriber.summarizer import LLMClient
 from gigaam_transcriber.context_utils import (
+    estimate_tokens,
     get_context_budget,
     split_into_chunks,
 )
@@ -994,6 +997,7 @@ _FALLBACK_ONLY_TEMPLATE = """\
 def generate_mindmap_markdown(
     transcription_text: str,
     llm_client: LLMClient,
+    model: Optional[str] = None,
 ) -> str:
     """Сгенерировать Markdown для mind map из транскрипции.
 
@@ -1001,16 +1005,17 @@ def generate_mindmap_markdown(
     """
     logger.info("Mindmap: calling LLM (text length=%d chars)", len(transcription_text))
 
-    model = llm_client.config.model
-    budget = get_context_budget(model, MINDMAP_SYSTEM_PROMPT, transcription_text)
+    effective_model = model or llm_client.config.model
+    budget = get_context_budget(effective_model, MINDMAP_SYSTEM_PROMPT, transcription_text)
 
     if budget["needs_compression"]:
-        raw_md = _generate_mindmap_map_reduce(transcription_text, llm_client, budget)
+        raw_md = _generate_mindmap_map_reduce(transcription_text, llm_client, budget, model=model)
     else:
         raw_md = llm_client.call(
             MINDMAP_SYSTEM_PROMPT,
             transcription_text,
             max_tokens=4096,
+            model_override=model,
         )
 
     logger.info(
@@ -1062,8 +1067,9 @@ def generate_mindmap_markdown(
     return processed
 
 
-def _generate_mindmap_map_reduce(text: str, llm_client: LLMClient, budget: dict) -> str:
+def _generate_mindmap_map_reduce(text: str, llm_client: LLMClient, budget: dict, model: Optional[str] = None) -> str:
     """Map-reduce mindmap generation for long texts."""
+    effective_model = model or llm_client.config.model
     chunk_max_tokens = min(3000, budget["total"] // 4)
     chunks = split_into_chunks(text, max_tokens=chunk_max_tokens)
     logger.info("Map-reduce mindmap: %d chunks", len(chunks))
@@ -1072,7 +1078,7 @@ def _generate_mindmap_map_reduce(text: str, llm_client: LLMClient, budget: dict)
     for i, chunk in enumerate(chunks):
         logger.debug("Generating subtree from chunk %d/%d", i + 1, len(chunks))
         try:
-            subtree = llm_client.call(MINDMAP_SYSTEM_PROMPT, chunk, max_tokens=4096)
+            subtree = llm_client.call(MINDMAP_SYSTEM_PROMPT, chunk, max_tokens=4096, model_override=model)
             subtrees.append(subtree)
         except Exception as e:
             logger.warning("Failed to generate subtree from chunk %d: %s", i + 1, e)
@@ -1081,11 +1087,66 @@ def _generate_mindmap_map_reduce(text: str, llm_client: LLMClient, budget: dict)
         return "# Тема транскрипции\n## Ошибка обработки\n- Не удалось сгенерировать структуру"
 
     combined = "\n\n---\n\n".join(subtrees)
-    try:
-        return llm_client.call(MINDMAP_REDUCE_PROMPT, combined, max_tokens=4096)
-    except Exception as e:
-        logger.error("Reduce step failed for mindmap: %s", e)
+    budget_check = get_context_budget(
+        effective_model, MINDMAP_REDUCE_PROMPT, combined,
+    )
+
+    if budget_check["available"] >= estimate_tokens(combined):
+        logger.info(
+            "Mindmap reduce: %d subtrees, %d tokens, strategy=simple",
+            len(subtrees),
+            budget_check["used_text"],
+        )
+        try:
+            return llm_client.call(MINDMAP_REDUCE_PROMPT, combined, max_tokens=4096, model_override=model)
+        except Exception as e:
+            logger.error("Reduce step failed for mindmap: %s", e)
+            return subtrees[0]
+
+    logger.info(
+        "Mindmap reduce: %d subtrees, %d tokens, strategy=hierarchical",
+        len(subtrees),
+        budget_check["used_text"],
+    )
+    prompt_tokens = estimate_tokens(MINDMAP_REDUCE_PROMPT)
+    available_per_group = budget_check["total"] - prompt_tokens - budget_check["output_reserve"]
+
+    subtrees_per_group = 1
+    for size in range(len(subtrees), 0, -1):
+        test_combined = "\n\n---\n\n".join(subtrees[:size])
+        if estimate_tokens(test_combined) <= available_per_group:
+            subtrees_per_group = size
+            break
+
+    sub_results: list[str] = []
+    for i in range(0, len(subtrees), subtrees_per_group):
+        group = subtrees[i : i + subtrees_per_group]
+        group_combined = "\n\n---\n\n".join(group)
+        try:
+            sub_result = llm_client.call(MINDMAP_REDUCE_PROMPT, group_combined, max_tokens=4096, model_override=model)
+            sub_results.append(sub_result)
+        except Exception as e:
+            logger.warning("Sub-group reduce failed: %s", e)
+            sub_results.append(group[0])
+
+    if not sub_results:
         return subtrees[0]
+
+    final_combined = "\n\n---\n\n".join(sub_results)
+    final_check = get_context_budget(
+        effective_model, MINDMAP_REDUCE_PROMPT, final_combined,
+    )
+    if final_check["available"] >= estimate_tokens(final_combined):
+        try:
+            return llm_client.call(MINDMAP_REDUCE_PROMPT, final_combined, max_tokens=4096, model_override=model)
+        except Exception as e:
+            logger.error("Final reduce failed for mindmap: %s", e)
+            return sub_results[0]
+
+    raise ValueError(
+        f"Text too long for context: {final_check['used_text']} tokens needed, "
+        f"{final_check['available']} available (model={effective_model})"
+    )
 
 
 

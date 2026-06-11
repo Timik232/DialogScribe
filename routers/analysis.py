@@ -69,15 +69,6 @@ def _ensure_llm() -> None:
         )
 
 
-def _maybe_update_model(model: str | None) -> None:
-    if model and model != llm_client.config.model:
-        llm_client.update_config(
-            llm_client.config.base_url,
-            llm_client.config.api_key,
-            model,
-        )
-
-
 @router.post("/summary")
 async def post_summary(
     body: SummaryRequest,
@@ -85,11 +76,10 @@ async def post_summary(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     _ensure_llm()
-    _maybe_update_model(body.model)
     await check_limit(db, user.id, "llm_call")
 
     try:
-        md_result = await generate_summary(body.text, body.template_key, llm_client)
+        md_result = await generate_summary(body.text, body.template_key, llm_client, model=body.model)
         html_result = summary_to_html(md_result)
         await track_usage(db, user.id, "llm_call", 1.0)
         return {"summary_markdown": md_result, "summary_html": html_result}
@@ -109,11 +99,10 @@ async def post_mindmap(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     _ensure_llm()
-    _maybe_update_model(body.model)
     await check_limit(db, user.id, "llm_call")
 
     try:
-        md_result = generate_mindmap_markdown(body.text, llm_client)
+        md_result = generate_mindmap_markdown(body.text, llm_client, model=body.model)
         uid = uuid.uuid4().hex[:12]
         mindmap_html = render_mindmap_html(md_result, uid=uid)
         await track_usage(db, user.id, "llm_call", 1.0)
@@ -134,16 +123,15 @@ async def post_insights(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     _ensure_llm()
-    _maybe_update_model(body.model)
     await check_limit(db, user.id, "llm_call")
 
     result: dict = {}
 
     try:
         if body.include_action_items:
-            result.update(extract_action_items(body.text, llm_client))
+            result.update(extract_action_items(body.text, llm_client, model=body.model))
         if body.include_suggested_steps:
-            result.update(generate_suggested_steps(body.text, llm_client))
+            result.update(generate_suggested_steps(body.text, llm_client, model=body.model))
         await track_usage(db, user.id, "llm_call", 1.0)
         return result
     except ValueError as exc:
@@ -162,7 +150,6 @@ async def post_chat(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     _ensure_llm()
-    _maybe_update_model(body.model)
     await check_limit(db, user.id, "llm_call")
 
     if not body.messages:

@@ -15,6 +15,7 @@ from gigaam_transcriber import GigaAMTranscriber
 from gigaam_transcriber.audio_processor import AudioProcessor
 from gigaam_transcriber.data_models import TranscriptionResult
 from gigaam_transcriber.auth import bootstrap_admin, get_current_user
+from gigaam_transcriber.utils import setup_logging
 from gigaam_transcriber.database import async_session_factory
 from gigaam_transcriber.models import User
 from gigaam_transcriber.mindmap import get_stored_mindmap
@@ -41,6 +42,7 @@ _BUILD_DIR = Path(__file__).parent / "frontend" / "build"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    setup_logging()
     transcriber = GigaAMTranscriber()
     app.state.transcriber = transcriber
     logger.info("DialogScribe API starting — transcriber initialized")

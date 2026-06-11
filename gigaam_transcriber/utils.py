@@ -6,6 +6,7 @@ import hashlib
 import logging
 import os
 import re
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
@@ -273,6 +274,30 @@ def setup_logging(
         format=format_str,
         handlers=handlers,
     )
+
+    llm_log_file = log_file or os.getenv("LLM_LOG_FILE", "/var/log/dialogscribe/llm.log")
+    if llm_log_file:
+        try:
+            llm_log_path = Path(llm_log_file)
+            ensure_dir(llm_log_path.parent)
+
+            llm_logger = logging.getLogger("gigaam_transcriber.llm")
+            handler = RotatingFileHandler(
+                str(llm_log_path),
+                maxBytes=50 * 1024 * 1024,
+                backupCount=3,
+                encoding="utf-8",
+            )
+            handler.setFormatter(logging.Formatter(
+                "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+            ))
+            llm_logger.addHandler(handler)
+            llm_logger.setLevel(logging.INFO)
+        except (PermissionError, OSError):
+            logging.getLogger("gigaam_transcriber.llm").warning(
+                "Cannot create LLM log file %s — falling back to stderr only",
+                llm_log_file,
+            )
 
 
 class ProgressTracker:

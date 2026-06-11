@@ -64,6 +64,7 @@ def _create_chunk_summaries(
     text: str,
     llm_client: LLMClient,
     chunk_size: int = 3000,
+    model: Optional[str] = None,
 ) -> list[dict]:
     """Split transcript into chunks and summarize each."""
     chunks = split_into_chunks(text, max_tokens=chunk_size)
@@ -72,7 +73,7 @@ def _create_chunk_summaries(
     for i, chunk in enumerate(chunks):
         logger.debug("Summarizing chunk %d/%d", i + 1, len(chunks))
         try:
-            summary = llm_client.call(CHUNK_SUMMARY_PROMPT, chunk, max_tokens=512)
+            summary = llm_client.call(CHUNK_SUMMARY_PROMPT, chunk, max_tokens=512, model_override=model)
             summaries.append({
                 "index": i,
                 "summary": summary.strip(),
@@ -143,21 +144,15 @@ def chat_with_transcript(
     if llm_client is None:
         llm_client = LLMClient()
 
-    if model and model != llm_client.config.model:
-        llm_client.update_config(
-            llm_client.config.base_url,
-            llm_client.config.api_key,
-            model,
-        )
+    effective_model = model or llm_client.config.model
 
-    effective_model = llm_client.config.model
     history = messages[:-1] if messages else []
     latest_message = messages[-1] if messages else None
 
     budget = get_context_budget(effective_model, CHAT_SYSTEM_PROMPT, text, history)
 
     if budget["needs_compression"]:
-        transcript_content = _get_compressed_transcript(text, latest_message, llm_client, budget)
+        transcript_content = _get_compressed_transcript(text, latest_message, llm_client, budget, model=model)
     else:
         transcript_content = f"TRANSCRIPT:\n{text}"
 
@@ -190,12 +185,13 @@ def _get_compressed_transcript(
     latest_message: Optional[dict],
     llm_client: LLMClient,
     budget: dict,
+    model: Optional[str] = None,
 ) -> str:
     """Get or create compressed transcript context."""
     cache_key = _get_cache_key(text)
     if cache_key not in _chunk_summary_cache:
         logger.info("Creating chunk summaries for long transcript (cache miss)")
-        _chunk_summary_cache[cache_key] = _create_chunk_summaries(text, llm_client)
+        _chunk_summary_cache[cache_key] = _create_chunk_summaries(text, llm_client, model=model)
 
     summaries = _chunk_summary_cache[cache_key]
     query = latest_message.get("content", "") if latest_message else ""

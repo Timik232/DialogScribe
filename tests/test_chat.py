@@ -112,7 +112,9 @@ class TestChatWithTranscript:
             llm_client=mock_client,
         )
 
-        mock_client.update_config.assert_called_once()
+        mock_client.update_config.assert_not_called()
+        create_call = mock_client._get_client.return_value.chat.completions.create.call_args
+        assert create_call.kwargs["model"] == "model-b"
 
     def test_chat_with_history(self):
         mock_client = MagicMock()

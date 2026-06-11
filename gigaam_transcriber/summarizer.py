@@ -19,7 +19,12 @@ from openai import OpenAI, APIError, APIConnectionError, RateLimitError, Authent
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-from gigaam_transcriber.context_utils import estimate_tokens, get_model_context_limit
+from gigaam_transcriber.context_utils import (
+    estimate_tokens,
+    get_context_budget,
+    get_model_context_limit,
+    split_into_chunks,
+)
 from gigaam_transcriber.template_manager import TemplateManager
 
 logger = logging.getLogger("gigaam_transcriber.llm")
@@ -235,13 +240,24 @@ class LLMClient:
         return self._client
 
     def update_config(self, base_url: str, api_key: str, model: str) -> None:
-        """Обновить конфигурацию и пересоздать клиент."""
+        """Обновить конфигурацию и пересоздать клиент.
+
+        .. warning::
+            NOT thread-safe. Mutates shared ``_config`` state.
+            Use ``call(model_override=...)`` for per-request model selection.
+        """
         self._config.base_url = base_url or DEFAULT_BASE_URL
         self._config.api_key = api_key
         self._config.model = model or DEFAULT_MODEL
         self._client = None
 
-    def call(self, system_prompt: str, user_text: str, max_tokens: int = 4096) -> str:
+    def call(
+        self,
+        system_prompt: str,
+        user_text: str,
+        max_tokens: int = 4096,
+        model_override: Optional[str] = None,
+    ) -> str:
         """
         Вызов LLM API с обработкой ошибок и retry.
 
@@ -249,6 +265,7 @@ class LLMClient:
             system_prompt: Системный промпт
             user_text: Текст пользователя (транскрипция)
             max_tokens: Максимум токенов в ответе
+            model_override: Per-call model override (thread-safe, no mutation).
 
         Returns:
             Текстовый ответ от LLM
@@ -258,6 +275,7 @@ class LLMClient:
             ConnectionError: Ошибка подключения
             RuntimeError: Ошибка API
         """
+        effective_model = model_override or self._config.model
         client = self._get_client()
         messages = [
             {"role": "system", "content": system_prompt},
@@ -266,7 +284,7 @@ class LLMClient:
 
         logger.info(
             "LLM call starting | model=%s | estimated_input_tokens=%d | messages=%d",
-            self._config.model,
+            effective_model,
             estimate_tokens(system_prompt + user_text),
             len(messages),
         )
@@ -276,7 +294,7 @@ class LLMClient:
             t0 = time.time()
             try:
                 response = client.chat.completions.create(
-                    model=self._config.model,
+                    model=effective_model,
                     messages=messages,
                     max_tokens=max_tokens,
                     temperature=0.3,
@@ -284,7 +302,7 @@ class LLMClient:
                 latency_ms = (time.time() - t0) * 1000
                 logger.info(
                     "LLM call completed | model=%s | input_tokens=%d | output_tokens=%d | latency_ms=%.0f | status=success",
-                    self._config.model,
+                    effective_model,
                     response.usage.prompt_tokens,
                     response.usage.completion_tokens,
                     latency_ms,
@@ -295,7 +313,7 @@ class LLMClient:
                 latency_ms = (time.time() - t0) * 1000
                 logger.error(
                     "LLM call failed | model=%s | error_type=%s | latency_ms=%.0f | status=error",
-                    self._config.model,
+                    effective_model,
                     type(e).__name__,
                     latency_ms,
                 )
@@ -307,7 +325,7 @@ class LLMClient:
                     backoff = float(2 ** attempt)
                     logger.warning(
                         "LLM call retry | model=%s | attempt=%d/%d | error_type=%s | backoff=%.1fs",
-                        self._config.model,
+                        effective_model,
                         attempt + 1,
                         self._max_retries,
                         type(e).__name__,
@@ -318,7 +336,7 @@ class LLMClient:
                 latency_ms = (time.time() - t0) * 1000
                 logger.error(
                     "LLM call failed | model=%s | error_type=%s | latency_ms=%.0f | status=error",
-                    self._config.model,
+                    effective_model,
                     type(e).__name__,
                     latency_ms,
                 )
@@ -330,7 +348,7 @@ class LLMClient:
                     backoff = float(2 ** attempt)
                     logger.warning(
                         "LLM call retry | model=%s | attempt=%d/%d | error_type=%s | backoff=%.1fs",
-                        self._config.model,
+                        effective_model,
                         attempt + 1,
                         self._max_retries,
                         type(e).__name__,
@@ -341,7 +359,7 @@ class LLMClient:
                 latency_ms = (time.time() - t0) * 1000
                 logger.error(
                     "LLM call failed | model=%s | error_type=%s | latency_ms=%.0f | status=error",
-                    self._config.model,
+                    effective_model,
                     type(e).__name__,
                     latency_ms,
                 )
@@ -396,43 +414,71 @@ class LLMClient:
 def split_text(
     text: str, max_tokens: int = MAX_CHUNK_TOKENS, overlap_sentences: int = CHUNK_OVERLAP_SENTENCES
 ) -> list[str]:
-    if estimate_tokens(text) <= max_tokens:
-        return [text]
-
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-    if len(sentences) <= 1:
-        sentences = text.split("\n")
-    if len(sentences) <= 1:
-        words = text.split()
-        chunk_size = max_tokens * 2
-        chunks = []
-        for i in range(0, len(words), chunk_size):
-            chunks.append(" ".join(words[i : i + chunk_size]))
-        return chunks if chunks else [text]
-
-    chunks: list[str] = []
-    current_chunk: list[str] = []
-    current_tokens = 0
-
-    for sentence in sentences:
-        sent_tokens = estimate_tokens(sentence)
-        if current_tokens + sent_tokens > max_tokens and current_chunk:
-            chunks.append(" ".join(current_chunk))
-            current_chunk = current_chunk[-overlap_sentences:] if overlap_sentences > 0 else []
-            current_tokens = sum(estimate_tokens(s) for s in current_chunk)
-
-        current_chunk.append(sentence)
-        current_tokens += sent_tokens
-
-    if current_chunk:
-        chunks.append(" ".join(current_chunk))
-
-    return chunks
+    """Разбить текст на чанки. Делегирует к context_utils.split_into_chunks()."""
+    return split_into_chunks(text, max_tokens, overlap_sentences)
 
 
 # ---------------------------------------------------------------------------
 # Генерация саммари
 # ---------------------------------------------------------------------------
+
+
+def _hierarchical_reduce(
+    chunk_summaries: list[str],
+    reduce_prompt: str,
+    llm_client: LLMClient,
+    max_depth: int = 2,
+    model: Optional[str] = None,
+) -> str:
+    """Reduce chunk summaries with budget-aware hierarchical splitting.
+
+    If combined summaries fit within the model's context budget, does a single
+    reduce call. Otherwise splits summaries into sub-groups, reduces each
+    sub-group, then reduces the intermediate results (up to max_depth=2).
+    """
+    effective_model = model or llm_client.config.model
+    combined = "\n\n---\n\n".join(chunk_summaries)
+    budget = get_context_budget(effective_model, reduce_prompt, combined)
+
+    if budget["available"] >= estimate_tokens(combined):
+        logger.info(
+            "Reduce: %d chunks, %d tokens, strategy=simple",
+            len(chunk_summaries),
+            budget["used_text"],
+        )
+        return llm_client.call(reduce_prompt, combined, model_override=model)
+
+    if max_depth <= 0:
+        raise ValueError(
+            f"Text too long for context: {budget['used_text']} tokens needed, "
+            f"{budget['available']} available (model={effective_model}, limit={budget['total']})"
+        )
+
+    logger.info(
+        "Reduce: %d chunks, %d tokens, strategy=hierarchical (depth=%d)",
+        len(chunk_summaries),
+        budget["used_text"],
+        max_depth,
+    )
+
+    prompt_tokens = estimate_tokens(reduce_prompt)
+    available_per_group = budget["total"] - prompt_tokens - budget["output_reserve"]
+
+    summaries_per_group = 1
+    for size in range(len(chunk_summaries), 0, -1):
+        test_combined = "\n\n---\n\n".join(chunk_summaries[:size])
+        if estimate_tokens(test_combined) <= available_per_group:
+            summaries_per_group = size
+            break
+
+    sub_results: list[str] = []
+    for i in range(0, len(chunk_summaries), summaries_per_group):
+        group = chunk_summaries[i : i + summaries_per_group]
+        group_combined = "\n\n---\n\n".join(group)
+        sub_result = llm_client.call(reduce_prompt, group_combined, model_override=model)
+        sub_results.append(sub_result)
+
+    return _hierarchical_reduce(sub_results, reduce_prompt, llm_client, max_depth - 1, model=model)
 
 
 async def generate_summary(
@@ -441,6 +487,7 @@ async def generate_summary(
     llm_client: LLMClient,
     db: Optional["AsyncSession"] = None,
     user_id: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> str:
     """
     Сгенерировать саммари транскрипции.
@@ -451,6 +498,7 @@ async def generate_summary(
         llm_client: Настроенный LLM-клиент
         db: AsyncSession для доступа к БД шаблонов
         user_id: ID пользователя для загрузки кастомных шаблонов
+        model: Per-request model override (thread-safe)
 
     Returns:
         Markdown-строка с саммари
@@ -466,10 +514,13 @@ async def generate_summary(
         )
 
     system_prompt = template["system_prompt"]
-    chunks = split_text(transcription_text)
+    effective_model = model or llm_client.config.model
+    chunks = split_into_chunks(
+        transcription_text, MAX_CHUNK_TOKENS, CHUNK_OVERLAP_SENTENCES, model=effective_model
+    )
 
     if len(chunks) == 1:
-        return llm_client.call(system_prompt, chunks[0])
+        return llm_client.call(system_prompt, chunks[0], model_override=model)
 
     # Map-reduce для длинных транскрипций
     logger.info("Map-reduce: %d chunks", len(chunks))
@@ -482,17 +533,16 @@ async def generate_summary(
             f"⚠️ Это часть {i + 1} из {len(chunks)} полной транскрипции. "
             f"Суммаризируй эту часть, сохранив все ключевые факты."
         )
-        summary = llm_client.call(chunk_prompt, chunk)
+        summary = llm_client.call(chunk_prompt, chunk, model_override=model)
         chunk_summaries.append(summary)
 
-    combined = "\n\n---\n\n".join(chunk_summaries)
     reduce_prompt = (
         "Ты — редактор. Перед тобой частичные саммари одной транскрипции, "
         "разбитой на части. Объедини их в единое целостное саммари, "
         "убрав дубли и сохранив структуру.\n\n"
         f"Используй формат:\n{system_prompt}"
     )
-    final = llm_client.call(reduce_prompt, combined)
+    final = _hierarchical_reduce(chunk_summaries, reduce_prompt, llm_client, model=model)
     return final
 
 

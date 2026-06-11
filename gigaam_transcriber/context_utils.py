@@ -216,10 +216,17 @@ def get_context_budget(
 # ---------------------------------------------------------------------------
 
 
+def _count_tokens(text: str, model: Optional[str] = None) -> int:
+    if model:
+        return estimate_tokens_accurate(text, model)
+    return estimate_tokens(text)
+
+
 def split_into_chunks(
     text: str,
     max_tokens: int = 3000,
     overlap_sentences: int = 2,
+    model: Optional[str] = None,
 ) -> list[str]:
     """Разбить текст на чанки по границам предложений с перекрытием.
 
@@ -227,6 +234,8 @@ def split_into_chunks(
         text: Исходный текст.
         max_tokens: Максимум токенов на чанк.
         overlap_sentences: Количество предложений перекрытия.
+        model: Опционально — имя модели для точной оценки токенов
+               через estimate_tokens_accurate.
 
     Returns:
         Список чанков. Если текст короткий — один элемент.
@@ -234,7 +243,7 @@ def split_into_chunks(
     if not text or not text.strip():
         return [text] if text else []
 
-    if estimate_tokens(text) <= max_tokens:
+    if _count_tokens(text, model) <= max_tokens:
         return [text]
 
     # Split by sentence boundaries: `.`, `!`, `?`, `\n`
@@ -242,7 +251,6 @@ def split_into_chunks(
     sentences = [s for s in sentences if s.strip()]
 
     if len(sentences) <= 1:
-        # Fallback: split by words
         words = text.split()
         chunk_size = max(1, max_tokens * 2)  # ~2 chars/token for mixed
         chunks = []
@@ -255,12 +263,11 @@ def split_into_chunks(
     current_tokens = 0
 
     for sentence in sentences:
-        sent_tokens = estimate_tokens(sentence)
+        sent_tokens = _count_tokens(sentence, model)
         if current_tokens + sent_tokens > max_tokens and current_chunk:
             chunks.append(" ".join(current_chunk))
-            # Keep overlap sentences
             current_chunk = current_chunk[-overlap_sentences:] if overlap_sentences > 0 else []
-            current_tokens = sum(estimate_tokens(s) for s in current_chunk)
+            current_tokens = sum(_count_tokens(s, model) for s in current_chunk)
 
         current_chunk.append(sentence)
         current_tokens += sent_tokens

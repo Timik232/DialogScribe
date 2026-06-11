@@ -206,7 +206,7 @@ class TestSplitText:
 
     def test_empty_text(self):
         chunks = split_text("", max_tokens=100)
-        assert chunks == [""]
+        assert chunks == []
 
 
 class TestEstimateTokens:
