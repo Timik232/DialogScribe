@@ -22,3 +22,4 @@ python-jose[cryptography]>=3.3
 passlib[bcrypt]>=1.7
 aiosmtplib>=3.0
 email-validator>=2.0
+pytest-asyncio

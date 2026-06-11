@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
@@ -21,7 +22,7 @@ if TYPE_CHECKING:
 from gigaam_transcriber.context_utils import estimate_tokens, get_model_context_limit
 from gigaam_transcriber.template_manager import TemplateManager
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("gigaam_transcriber.llm")
 
 # ---------------------------------------------------------------------------
 # Конфигурация по умолчанию
@@ -256,26 +257,71 @@ class LLMClient:
             RuntimeError: Ошибка API
         """
         client = self._get_client()
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text},
+        ]
 
+        logger.info(
+            "LLM call starting | model=%s | estimated_input_tokens=%d | messages=%d",
+            self._config.model,
+            estimate_tokens(system_prompt + user_text),
+            len(messages),
+        )
+
+        t0 = time.time()
         try:
             response = client.chat.completions.create(
                 model=self._config.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_text},
-                ],
+                messages=messages,
                 max_tokens=max_tokens,
                 temperature=0.3,
+            )
+            latency_ms = (time.time() - t0) * 1000
+            logger.info(
+                "LLM call completed | model=%s | input_tokens=%d | output_tokens=%d | latency_ms=%.0f | status=success",
+                self._config.model,
+                response.usage.prompt_tokens,
+                response.usage.completion_tokens,
+                latency_ms,
             )
             return response.choices[0].message.content or ""
 
         except AuthenticationError as e:
+            latency_ms = (time.time() - t0) * 1000
+            logger.error(
+                "LLM call failed | model=%s | error_type=%s | latency_ms=%.0f | status=error",
+                self._config.model,
+                type(e).__name__,
+                latency_ms,
+            )
             raise ValueError(f"Ошибка авторизации: {e}") from e
         except RateLimitError as e:
+            latency_ms = (time.time() - t0) * 1000
+            logger.error(
+                "LLM call failed | model=%s | error_type=%s | latency_ms=%.0f | status=error",
+                self._config.model,
+                type(e).__name__,
+                latency_ms,
+            )
             raise RuntimeError(f"Превышен лимит запросов: {e}") from e
         except APIConnectionError as e:
+            latency_ms = (time.time() - t0) * 1000
+            logger.error(
+                "LLM call failed | model=%s | error_type=%s | latency_ms=%.0f | status=error",
+                self._config.model,
+                type(e).__name__,
+                latency_ms,
+            )
             raise ConnectionError(f"Не удалось подключиться к {self._config.base_url}: {e}") from e
         except APIError as e:
+            latency_ms = (time.time() - t0) * 1000
+            logger.error(
+                "LLM call failed | model=%s | error_type=%s | latency_ms=%.0f | status=error",
+                self._config.model,
+                type(e).__name__,
+                latency_ms,
+            )
             raise RuntimeError(f"Ошибка API: {e}") from e
 
     def test_connection(self) -> tuple[bool, str]:
