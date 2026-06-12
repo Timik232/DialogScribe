@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { transcriptionStore } from "$lib/stores/transcription";
 	import { fetchApi } from "$lib/services/api";
+	import { authStore } from "$lib/stores/auth";
 
 	// ── State ──
 
@@ -142,10 +143,15 @@
 	async function exportSummary(format: string) {
 		if (!summaryMarkdown) return;
 		try {
+			let token = '';
+			authStore.subscribe((s: any) => (token = s.accessToken))();
 			const res = await fetch("/api/export", {
 				method: "POST",
 				credentials: "include",
-				headers: { "Content-Type": "application/json" },
+				headers: {
+					"Content-Type": "application/json",
+					...(token ? { Authorization: `Bearer ${token}` } : {}),
+				},
 				body: JSON.stringify({
 					data: {
 						text: summaryMarkdown,
@@ -314,10 +320,15 @@
 	async function exportInsights(format: string) {
 		if (!insightsData) return;
 		try {
+			let token = '';
+			authStore.subscribe((s: any) => (token = s.accessToken))();
 			const res = await fetch("/api/export-insights", {
 				method: "POST",
 				credentials: "include",
-				headers: { "Content-Type": "application/json" },
+				headers: {
+					"Content-Type": "application/json",
+					...(token ? { Authorization: `Bearer ${token}` } : {}),
+				},
 				body: JSON.stringify({
 					action_items: insightsData.action_items ?? [],
 					decisions: insightsData.decisions ?? [],

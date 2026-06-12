@@ -1,6 +1,7 @@
 <script lang="ts">
 	import AudioUploader from '$lib/components/AudioUploader.svelte';
 	import { fetchApi } from '$lib/services/api';
+	import { authStore } from '$lib/stores/auth';
 
 	interface Template {
 		slug: string;
@@ -235,9 +236,14 @@
 
 	async function downloadExport(format: string, data: any, filename: string): Promise<void> {
 		try {
+			let token = '';
+			authStore.subscribe((s: any) => (token = s.accessToken))();
 			const res = await fetch('/api/export', {
 				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
+				headers: {
+					'Content-Type': 'application/json',
+					...(token ? { Authorization: `Bearer ${token}` } : {}),
+				},
 				credentials: 'include',
 				body: JSON.stringify({
 				data,
