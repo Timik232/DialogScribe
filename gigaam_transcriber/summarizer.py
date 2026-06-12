@@ -35,7 +35,7 @@ logger = logging.getLogger("gigaam_transcriber.llm")
 # ---------------------------------------------------------------------------
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
-DEFAULT_MODEL = "gpt-4.1"
+DEFAULT_MODEL = "glm-5-turbo"
 MAX_CHUNK_TOKENS = 3000
 CHUNK_OVERLAP_SENTENCES = 2
 
