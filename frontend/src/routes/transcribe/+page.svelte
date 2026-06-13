@@ -166,9 +166,14 @@
 	async function downloadExport(format: string): Promise<void> {
 		if (!result) return;
 		try {
+			let token = '';
+			authStore.subscribe((s: any) => (token = s.accessToken))();
 			const res = await fetch('/api/export', {
 				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
+				headers: {
+					'Content-Type': 'application/json',
+					...(token ? { Authorization: `Bearer ${token}` } : {})
+				},
 				credentials: 'include',
 				body: JSON.stringify({
 					data: result,
