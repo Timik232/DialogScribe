@@ -1,7 +1,6 @@
 <script lang="ts">
 	import AudioUploader from '$lib/components/AudioUploader.svelte';
-	import { fetchApi } from '$lib/services/api';
-	import { authStore } from '$lib/stores/auth';
+	import { fetchApi, fetchApiBlob } from '$lib/services/api';
 
 	interface Template {
 		slug: string;
@@ -236,26 +235,16 @@
 
 	async function downloadExport(format: string, data: any, filename: string): Promise<void> {
 		try {
-			let token = '';
-			authStore.subscribe((s: any) => (token = s.accessToken))();
-			const res = await fetch('/api/export', {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					...(token ? { Authorization: `Bearer ${token}` } : {}),
-				},
-				credentials: 'include',
+			const blob = await fetchApiBlob('POST', '/api/export', {
+				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
-				data,
-				format,
-				filename,
-				speaker_names: Object.keys(speakerNames).length > 0 ? speakerNames : undefined
-			})
+					data,
+					format,
+					filename,
+					speaker_names: Object.keys(speakerNames).length > 0 ? speakerNames : undefined
+				})
 			});
 
-			if (!res.ok) throw new Error('Экспорт не удался');
-
-			const blob = await res.blob();
 			const extMap: Record<string, string> = {
 				txt: '.txt', json: '.json', srt: '.srt',
 				vtt: '.vtt', docx: '.docx', pdf: '.pdf'

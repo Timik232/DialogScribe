@@ -1,7 +1,6 @@
 <script lang="ts">
 	import { transcriptionStore } from "$lib/stores/transcription";
-	import { fetchApi } from "$lib/services/api";
-	import { authStore } from "$lib/stores/auth";
+	import { fetchApi, fetchApiBlob } from "$lib/services/api";
 
 	// ── State ──
 
@@ -143,15 +142,8 @@
 	async function exportSummary(format: string) {
 		if (!summaryMarkdown) return;
 		try {
-			let token = '';
-			authStore.subscribe((s: any) => (token = s.accessToken))();
-			const res = await fetch("/api/export", {
-				method: "POST",
-				credentials: "include",
-				headers: {
-					"Content-Type": "application/json",
-					...(token ? { Authorization: `Bearer ${token}` } : {}),
-				},
+			const blob = await fetchApiBlob("POST", "/api/export", {
+				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({
 					data: {
 						text: summaryMarkdown,
@@ -163,8 +155,6 @@
 					filename: "summary",
 				}),
 			});
-			if (!res.ok) throw new Error(`Export failed: ${res.status}`);
-			const blob = await res.blob();
 			const ext = format === "docx" ? ".docx" : format === "pdf" ? ".pdf" : ".txt";
 			const url = URL.createObjectURL(blob);
 			const a = document.createElement("a");
@@ -320,15 +310,8 @@
 	async function exportInsights(format: string) {
 		if (!insightsData) return;
 		try {
-			let token = '';
-			authStore.subscribe((s: any) => (token = s.accessToken))();
-			const res = await fetch("/api/export-insights", {
-				method: "POST",
-				credentials: "include",
-				headers: {
-					"Content-Type": "application/json",
-					...(token ? { Authorization: `Bearer ${token}` } : {}),
-				},
+			const blob = await fetchApiBlob("POST", "/api/export-insights", {
+				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({
 					action_items: insightsData.action_items ?? [],
 					decisions: insightsData.decisions ?? [],
@@ -336,8 +319,6 @@
 					format,
 				}),
 			});
-			if (!res.ok) throw new Error(`Export failed: ${res.status}`);
-			const blob = await res.blob();
 			const ext = format === "docx" ? ".docx" : ".txt";
 			const url = URL.createObjectURL(blob);
 			const a = document.createElement("a");
