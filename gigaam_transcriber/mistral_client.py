@@ -342,8 +342,10 @@ class MistralASRClient(ASRProviderBase):
         self,
         audio_path: str,
         segments: list[Any],
+        language: str | None = None,
     ) -> list[TranscriptionSegment]:
         """Батч-транскрипция сегментов с сохранением speaker/start/end."""
+        _ = language  # Voxtral определяет язык автоматически; параметр — часть контракта ASRProviderBase
         audio, sr = self._load_audio(audio_path)
 
         results: list[TranscriptionSegment] = []

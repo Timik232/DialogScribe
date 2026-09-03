@@ -190,7 +190,7 @@ def get_asr_provider(
         primary_enum = ASRProvider(pref)
     except ValueError:
         logger.warning("Unknown ASR provider %r, defaulting to litellm", preference)
-        primary_enum = ASRProvider.MISTRAL
+        primary_enum = ASRProvider.LITELLM
 
     primary = _create_provider(primary_enum)
 

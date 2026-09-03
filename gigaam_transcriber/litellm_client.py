@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
+import io
 import logging
 import os
 from typing import Any
@@ -128,12 +130,13 @@ class LiteLLMASRClient(ASRProviderBase):
         segments: list[Any],
         language: str | None = None,
     ) -> list[TranscriptionSegment]:
+        sf = importlib.import_module("soundfile")
+
+        audio, sr = sf.read(audio_path, always_2d=False)
+        if getattr(audio, "ndim", 1) > 1:
+            audio = audio.mean(axis=1)
+
         results: list[TranscriptionSegment] = []
-        with open(audio_path, "rb") as f:
-            raw = f.read()
-
-        ext = audio_path.rsplit(".", 1)[-1] if "." in audio_path else "wav"
-
         for seg in segments:
             if isinstance(seg, dict):
                 start = float(seg.get("start", 0.0))
@@ -146,7 +149,16 @@ class LiteLLMASRClient(ASRProviderBase):
             else:
                 raise ValueError(f"Invalid segment format: {seg!r}")
 
-            files = {"file": (f"audio.{ext}", raw, "application/octet-stream")}
+            segment_audio = audio[int(start * sr):int(end * sr)]
+            if getattr(segment_audio, "size", 0) == 0:
+                results.append(
+                    TranscriptionSegment(text="", start=start, end=end, speaker=speaker),
+                )
+                continue
+
+            buffer = io.BytesIO()
+            sf.write(buffer, segment_audio, sr, format="WAV")
+            files = {"file": ("audio.wav", buffer.getvalue(), "application/octet-stream")}
             data: dict[str, Any] = {"model": self._model}
             if language:
                 data["language"] = language
