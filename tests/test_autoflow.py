@@ -45,7 +45,7 @@ class TestRunAutoflow:
         assert result.transcription_result is not None
         assert result.summary_text != ""
         assert result.mindmap_md != ""
-        assert result.mindmap_html != ""
+        assert not hasattr(result, "mindmap_html")
         assert result.errors == []
         assert "transcription" in result.stage_timings
         assert "summary" in result.stage_timings

@@ -128,7 +128,6 @@ class TestMindmap:
         with (
             patch("routers.analysis.llm_client", mock_llm),
             patch("routers.analysis.generate_mindmap_markdown", return_value="# Root\n## Branch"),
-            patch("routers.analysis.render_mindmap_html", return_value='<iframe src="/mindmap/test" width="100%" height="500"></iframe>'),
         ):
             resp = client.post(
                 "/api/mindmap",
@@ -138,10 +137,8 @@ class TestMindmap:
         assert resp.status_code == 200
         data = resp.json()
         assert data["mindmap_markdown"] == "# Root\n## Branch"
-        assert "mindmap_uid" in data
-        assert len(data["mindmap_uid"]) == 12
-        assert "mindmap_html" in data
-        assert "<iframe" in data["mindmap_html"]
+        assert "mindmap_uid" not in data
+        assert "mindmap_html" not in data
 
     def test_mindmap_llm_not_configured(self, client):
         mock_llm = _mock_llm(api_key="")
