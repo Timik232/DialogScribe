@@ -28,7 +28,12 @@ pipeline {
     stages {
         stage('Clean checkout') {
             steps {
-                deleteDir()
+                sh '''
+                    docker run --rm \
+                        -v "$HOST_WORKSPACE:/w" \
+                        alpine:3 \
+                        sh -c "chown -R $(id -u):$(id -g) /w && find /w -mindepth 1 -maxdepth 1 -exec rm -rf {} +"
+                '''
                 sh '''
                     set -eu
                     git clone --no-tags "$GIT_URL" .
@@ -44,6 +49,7 @@ pipeline {
             steps {
                 sh '''
                     docker run --rm \
+                        --user "$(id -u):$(id -g)" \
                         -v "$HOST_WORKSPACE:/repo" \
                         zricethezav/gitleaks:v8.24.3 \
                         dir /repo --redact --no-banner \
@@ -63,6 +69,8 @@ pipeline {
             steps {
                 sh '''
                     docker run --rm \
+                        --user "$(id -u):$(id -g)" \
+                        -e PYTHONDONTWRITEBYTECODE=1 \
                         -v "$HOST_WORKSPACE:/workspace" -w /workspace \
                         "$PYTHON_IMAGE" \
                         python tools/validate_audit_matrix.py audit/findings.json \
@@ -75,10 +83,12 @@ pipeline {
             steps {
                 sh '''
                     docker run --rm \
+                        --user "$(id -u):$(id -g)" \
+                        -e PYTHONDONTWRITEBYTECODE=1 \
                         -e JWT_SECRET \
                         -v "$HOST_WORKSPACE:/workspace" -w /workspace \
                         "$PYTHON_IMAGE" \
-                        python -m pytest --collect-only -q \
+                        python -m pytest --collect-only -q -p no:cacheprovider \
                         -m "not requires_gpu and not requires_hf_token and not requires_model" \
                         > .ci-artifacts/python-collection.log
                 '''
@@ -89,6 +99,8 @@ pipeline {
             steps {
                 sh '''
                     docker run --rm \
+                        --user "$(id -u):$(id -g)" \
+                        -e PYTHONDONTWRITEBYTECODE=1 \
                         -e JWT_SECRET \
                         -v "$HOST_WORKSPACE:/workspace" -w /workspace \
                         "$PYTHON_IMAGE" \
@@ -108,6 +120,8 @@ pipeline {
             steps {
                 sh '''
                     docker run --rm \
+                        --user "$(id -u):$(id -g)" \
+                        -e PYTHONDONTWRITEBYTECODE=1 \
                         -v "$HOST_WORKSPACE:/workspace" -w /workspace \
                         "$PYTHON_IMAGE" \
                         python -m ruff check \
@@ -124,16 +138,22 @@ pipeline {
             steps {
                 sh '''
                     docker run --rm \
+                        --user "$(id -u):$(id -g)" \
+                        -e HOME=/tmp \
                         -e NPM_CONFIG_REGISTRY \
                         -v "$HOST_WORKSPACE/frontend:/app" -w /app \
                         node:20-slim \
                         sh -lc 'npm ci --cache /tmp/npm-cache && npx svelte-check --tsconfig ./tsconfig.json --output machine' \
                         > .ci-artifacts/frontend-check.log || test "$?" -eq 1
                     docker run --rm \
+                        --user "$(id -u):$(id -g)" \
+                        -e PYTHONDONTWRITEBYTECODE=1 \
                         -v "$HOST_WORKSPACE:/workspace" -w /workspace \
                         "$PYTHON_IMAGE" \
                         python tools/verify_frontend_baseline.py .ci-artifacts/frontend-check.log
                     docker run --rm \
+                        --user "$(id -u):$(id -g)" \
+                        -e HOME=/tmp \
                         -e NPM_CONFIG_REGISTRY \
                         -v "$HOST_WORKSPACE/frontend:/app" -w /app \
                         node:20-slim \
