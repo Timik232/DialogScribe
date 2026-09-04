@@ -2,7 +2,9 @@
 
 import os
 import tempfile
+from html.parser import HTMLParser
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -19,6 +21,40 @@ from gigaam_transcriber.exporters import (
     export_pdf_mindmap,
     export_docx_insights,
 )
+
+
+MALICIOUS_MARKDOWN = """# Safe heading
+
+<script>alert('script')</script>
+<svg onload="alert('svg')"><circle /></svg>
+<img src="https://example.com/image.png" onerror="alert('img')">
+<a href="javascript:alert('link')">JavaScript link</a>
+<a href="data:text/html,<script>alert('data')</script>">Data link</a>
+<div style="background:url(javascript:alert('css'))">Styled content</div>
+<p><strong>Malformed nesting</p></strong>
+"""
+
+
+def _assert_no_executable_html(source: str) -> None:
+    class TagCollector(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.tags = []
+
+        def handle_starttag(self, tag, attrs):
+            self.tags.append((tag, dict(attrs)))
+
+    collector = TagCollector()
+    collector.feed(source)
+
+    forbidden_tags = {"script", "svg", "iframe", "object", "embed", "form"}
+    for tag, attrs in collector.tags:
+        assert tag not in forbidden_tags
+        assert not any(name.lower().startswith("on") for name in attrs)
+        assert "style" not in attrs
+        for name in ("href", "src"):
+            value = attrs.get(name, "").lower()
+            assert not value.startswith(("javascript:", "data:"))
 
 
 def _make_result(with_speakers=True, cyrillic=True):
@@ -174,6 +210,43 @@ class TestExportPdfSummary:
         assert Path(path).exists()
         assert os.path.getsize(path) > 0
 
+    def test_sanitizes_malicious_markdown_and_escapes_title(self, temp_dir):
+        out = temp_dir / "xss_summary.pdf"
+        with patch("weasyprint.HTML") as html_renderer:
+            export_pdf_summary(
+                MALICIOUS_MARKDOWN,
+                '<img src=x onerror="alert(1)">',
+                str(out),
+            )
+
+        source = html_renderer.call_args.kwargs["string"]
+        _assert_no_executable_html(source)
+        assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;" in source
+        assert "<h1>Safe heading</h1>" in source
+        assert "Malformed nesting" in source
+
+    def test_preserves_benign_markdown_formatting(self, temp_dir):
+        markdown = """## Heading
+
+- first
+- second
+
+**bold** and [safe](https://example.com/path)
+
+| A | B |
+|---|---|
+| 1 | 2 |
+"""
+        with patch("weasyprint.HTML") as html_renderer:
+            export_pdf_summary(markdown, "Safe title", str(temp_dir / "safe.pdf"))
+
+        source = html_renderer.call_args.kwargs["string"]
+        assert "<h2>Heading</h2>" in source
+        assert "<ul>" in source and "<li>first</li>" in source
+        assert "<strong>bold</strong>" in source
+        assert 'href="https://example.com/path"' in source
+        assert "<table>" in source and "<th>A</th>" in source
+
 
 class TestExportPdfMindmap:
     def test_creates_pdf(self, temp_dir):
@@ -183,6 +256,31 @@ class TestExportPdfMindmap:
 
         assert Path(path).exists()
         assert os.path.getsize(path) > 0
+
+    def test_sanitizes_malicious_mindmap_source(self, temp_dir):
+        with patch("weasyprint.HTML") as html_renderer:
+            export_pdf_mindmap(MALICIOUS_MARKDOWN, str(temp_dir / "mindmap-xss.pdf"))
+
+        source = html_renderer.call_args.kwargs["string"]
+        _assert_no_executable_html(source)
+        assert "Safe heading" in source
+
+
+class TestExportPdfTranscriptionSafety:
+    def test_escapes_user_metadata_before_rendering(self, temp_dir):
+        result = _make_result(with_speakers=True)
+        result.model_name = '<img src=x onerror="alert(1)">'
+        result.language = '<svg onload="alert(1)">'
+        result.metadata["source"] = '<script>alert(1)</script>'
+        result.segments[0].speaker = '<a href="javascript:alert(1)">speaker</a>'
+        result.segments[0].text = '<img src=x onerror="alert(1)">'
+
+        with patch("weasyprint.HTML") as html_renderer:
+            export_pdf_transcription(result, str(temp_dir / "transcription-xss.pdf"))
+
+        source = html_renderer.call_args.kwargs["string"]
+        _assert_no_executable_html(source)
+        assert "&lt;img src=x onerror=" in source
 
 
 class TestBackwardCompatibility:

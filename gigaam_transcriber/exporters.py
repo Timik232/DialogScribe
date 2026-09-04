@@ -1,12 +1,41 @@
 """DOCX and PDF export for transcriptions, summaries, and mind maps."""
 
+import html
 import logging
 import re
 from typing import Optional
 
+import nh3
+
 from gigaam_transcriber.data_models import TranscriptionResult, _format_time_txt
 
 logger = logging.getLogger(__name__)
+
+_ALLOWED_HTML_TAGS = {
+    "h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "li",
+    "strong", "em", "b", "i", "code", "pre", "blockquote", "table",
+    "thead", "tbody", "tr", "th", "td", "a", "img", "br", "hr",
+    "span", "div",
+}
+_ALLOWED_HTML_ATTRIBUTES = {
+    "a": {"href", "title"},
+    "img": {"src", "alt"},
+}
+_ALLOWED_URL_SCHEMES = {"http", "https", "mailto"}
+_REMOVE_WITH_CONTENT_TAGS = {"script", "style", "iframe", "object", "embed", "form", "svg"}
+
+
+def _sanitize_html_fragment(value: str) -> str:
+    """Sanitize generated HTML before it enters an export renderer."""
+    return nh3.clean(
+        value,
+        tags=_ALLOWED_HTML_TAGS,
+        attributes=_ALLOWED_HTML_ATTRIBUTES,
+        url_schemes=_ALLOWED_URL_SCHEMES,
+        url_relative="deny",
+        clean_content_tags=_REMOVE_WITH_CONTENT_TAGS,
+        link_rel="noopener noreferrer",
+    )
 
 _PDF_CSS = """
 @page {
@@ -51,8 +80,6 @@ th {
 
 def _transcription_to_pdf_html(result: TranscriptionResult) -> str:
     """Generate HTML suitable for PDF from TranscriptionResult."""
-    import html as _html
-
     has_speakers = any(seg.speaker for seg in result.segments)
 
     rows = []
@@ -60,8 +87,8 @@ def _transcription_to_pdf_html(result: TranscriptionResult) -> str:
         start_str = _format_time_txt(seg.start)
         end_str = _format_time_txt(seg.end)
         time_cell = f"{start_str} - {end_str}"
-        speaker_cell = _html.escape(seg.speaker) if seg.speaker else ""
-        text_cell = _html.escape(seg.text)
+        speaker_cell = html.escape(seg.speaker) if seg.speaker else ""
+        text_cell = html.escape(seg.text)
         rows.append(
             f"<tr><td>{time_cell}</td>"
             + (f"<td class='speaker'>{speaker_cell}</td>" if has_speakers else "")
@@ -76,20 +103,22 @@ def _transcription_to_pdf_html(result: TranscriptionResult) -> str:
 
     meta_parts = [
         f"Длительность: {result.duration:.1f}s",
-        f"Модель: {_html.escape(result.model_name)}",
-        f"Язык: {_html.escape(result.language)}",
+        f"Модель: {html.escape(result.model_name)}",
+        f"Язык: {html.escape(result.language)}",
     ]
     if result.metadata.get("source"):
-        meta_parts.append(f"Файл: {_html.escape(str(result.metadata['source']))}")
+        meta_parts.append(f"Файл: {html.escape(str(result.metadata['source']))}")
 
+    body_html = _sanitize_html_fragment(f"""
+<h1>Транскрипция</h1>
+<p>{' | '.join(meta_parts)}</p>
+<table>{header}
+{chr(10).join(rows)}
+</table>""")
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>{_PDF_CSS}</style></head>
 <body>
-<h1>Транскрипция</h1>
-<p class="meta">{' | '.join(meta_parts)}</p>
-<table>{header}
-{chr(10).join(rows)}
-</table>
+{body_html}
 </body></html>"""
 
 
@@ -258,15 +287,17 @@ def export_pdf_summary(summary_md: str, title: str, output_path: str) -> str:
     import markdown as md_lib
     from weasyprint import HTML
 
-    body_html = md_lib.markdown(
-        summary_md,
-        extensions=["tables", "fenced_code", "nl2br"],
+    body_html = _sanitize_html_fragment(
+        md_lib.markdown(
+            summary_md,
+            extensions=["tables", "fenced_code", "nl2br"],
+        )
     )
 
     full_html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>{_PDF_CSS}</style></head>
 <body>
-<h1>{title}</h1>
+<h1>{html.escape(title)}</h1>
 {body_html}
 </body></html>"""
 
@@ -289,7 +320,7 @@ def export_pdf_mindmap(mindmap_md: str, output_path: str) -> str:
     from gigaam_transcriber.mindmap import render_mindmap_fallback
     from weasyprint import HTML
 
-    static_html = render_mindmap_fallback(mindmap_md)
+    static_html = _sanitize_html_fragment(render_mindmap_fallback(mindmap_md))
 
     full_html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>{_PDF_CSS}
