@@ -12,7 +12,6 @@ from gigaam_transcriber.summarizer import (
     get_available_models,
     parse_models_csv,
     split_text,
-    summary_to_html,
     DEFAULT_BASE_URL,
     DEFAULT_MODEL,
 )
@@ -267,22 +266,6 @@ class TestGenerateSummary:
         client = LLMClient(LLMClientConfig(api_key="sk-test"))
         with pytest.raises(ValueError, match="Неизвестный шаблон"):
             await generate_summary("text", "nonexistent", client)
-
-
-# ===== Summary to HTML tests (task 9.4) =====
-
-
-class TestSummaryToHtml:
-    def test_markdown_to_html(self):
-        md = "## Заголовок\n\n- пункт 1\n- пункт 2"
-        html = summary_to_html(md)
-        assert "<h2>" in html
-        assert "<li>" in html
-
-    def test_table_rendering(self):
-        md = "| A | B |\n|---|---|\n| 1 | 2 |"
-        html = summary_to_html(md)
-        assert "<table>" in html
 
 
 # ===== Templates tests (task 9.4) =====

@@ -13,7 +13,6 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
-import markdown as md_lib
 from openai import OpenAI, APIError, APIConnectionError, RateLimitError, AuthenticationError
 
 if TYPE_CHECKING:
@@ -545,11 +544,3 @@ async def generate_summary(
     )
     final = _hierarchical_reduce(chunk_summaries, reduce_prompt, llm_client, model=model)
     return final
-
-
-def summary_to_html(markdown_text: str) -> str:
-    """Конвертировать Markdown-саммари в HTML для Gradio."""
-    return md_lib.markdown(
-        markdown_text,
-        extensions=["tables", "fenced_code", "nl2br"],
-    )
