@@ -22,6 +22,7 @@ pipeline {
         PIP_EXTRA_INDEX_URL = 'https://pypi.org/simple/'
         NPM_CONFIG_REGISTRY = 'https://npm-mirror.gitverse.ru'
         JWT_SECRET = 'ci-test-only-not-a-production-secret-0123456789'
+        HOST_WORKSPACE = '/DATA/AppData/jenkins/home/workspace/dialogscribe-ci'
     }
 
     stages {
@@ -43,7 +44,7 @@ pipeline {
             steps {
                 sh '''
                     docker run --rm \
-                        -v "$WORKSPACE:/repo" \
+                        -v "$HOST_WORKSPACE:/repo" \
                         zricethezav/gitleaks:v8.24.3 \
                         dir /repo --redact --no-banner \
                         --report-format=json \
@@ -62,7 +63,7 @@ pipeline {
             steps {
                 sh '''
                     docker run --rm \
-                        -v "$WORKSPACE:/workspace" -w /workspace \
+                        -v "$HOST_WORKSPACE:/workspace" -w /workspace \
                         "$PYTHON_IMAGE" \
                         python tools/validate_audit_matrix.py audit/findings.json \
                         | tee .ci-artifacts/audit-matrix.log
@@ -75,7 +76,7 @@ pipeline {
                 sh '''
                     docker run --rm \
                         -e JWT_SECRET \
-                        -v "$WORKSPACE:/workspace" -w /workspace \
+                        -v "$HOST_WORKSPACE:/workspace" -w /workspace \
                         "$PYTHON_IMAGE" \
                         python -m pytest --collect-only -q \
                         -m "not requires_gpu and not requires_hf_token and not requires_model" \
@@ -89,7 +90,7 @@ pipeline {
                 sh '''
                     docker run --rm \
                         -e JWT_SECRET \
-                        -v "$WORKSPACE:/workspace" -w /workspace \
+                        -v "$HOST_WORKSPACE:/workspace" -w /workspace \
                         "$PYTHON_IMAGE" \
                         python tools/verify_test_baseline.py \
                         --junit .ci-artifacts/python-tests.xml \
@@ -107,7 +108,7 @@ pipeline {
             steps {
                 sh '''
                     docker run --rm \
-                        -v "$WORKSPACE:/workspace" -w /workspace \
+                        -v "$HOST_WORKSPACE:/workspace" -w /workspace \
                         "$PYTHON_IMAGE" \
                         python -m ruff check \
                         tools/validate_audit_matrix.py \
@@ -124,17 +125,17 @@ pipeline {
                 sh '''
                     docker run --rm \
                         -e NPM_CONFIG_REGISTRY \
-                        -v "$WORKSPACE/frontend:/app" -w /app \
+                        -v "$HOST_WORKSPACE/frontend:/app" -w /app \
                         node:20-slim \
                         sh -lc 'npm ci --cache /tmp/npm-cache && npx svelte-check --tsconfig ./tsconfig.json --output machine' \
                         > .ci-artifacts/frontend-check.log || test "$?" -eq 1
                     docker run --rm \
-                        -v "$WORKSPACE:/workspace" -w /workspace \
+                        -v "$HOST_WORKSPACE:/workspace" -w /workspace \
                         "$PYTHON_IMAGE" \
                         python tools/verify_frontend_baseline.py .ci-artifacts/frontend-check.log
                     docker run --rm \
                         -e NPM_CONFIG_REGISTRY \
-                        -v "$WORKSPACE/frontend:/app" -w /app \
+                        -v "$HOST_WORKSPACE/frontend:/app" -w /app \
                         node:20-slim \
                         sh -lc 'npm run build' \
                         | tee .ci-artifacts/frontend-build.log
