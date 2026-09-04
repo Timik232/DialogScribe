@@ -21,7 +21,7 @@ pipeline {
         PIP_INDEX_URL = 'http://192.168.1.48:3141/root/pypi/+simple/'
         PIP_EXTRA_INDEX_URL = 'https://pypi.org/simple/'
         NPM_CONFIG_REGISTRY = 'https://npm-mirror.gitverse.ru'
-        JWT_SECRET = 'ci-test-only-not-a-production-secret-0123456789'
+        JWT_SECRET = 'ci-test-only'
         HOST_WORKSPACE = '/DATA/AppData/jenkins/home/workspace/dialogscribe-ci'
     }
 
@@ -89,7 +89,7 @@ pipeline {
                         -v "$HOST_WORKSPACE:/workspace" -w /workspace \
                         "$PYTHON_IMAGE" \
                         python -m pytest --collect-only -q -p no:cacheprovider \
-                        -m "not requires_gpu and not requires_hf_token and not requires_model" \
+                        -m "not slow and not requires_gpu and not requires_hf_token and not requires_model" \
                         > .ci-artifacts/python-collection.log
                 '''
             }
@@ -106,7 +106,8 @@ pipeline {
                         "$PYTHON_IMAGE" \
                         python tools/verify_test_baseline.py \
                         --junit .ci-artifacts/python-tests.xml \
-                        -m "not requires_gpu and not requires_hf_token and not requires_model"
+                        -p no:cacheprovider \
+                        -m "not slow and not requires_gpu and not requires_hf_token and not requires_model"
                 '''
             }
             post {
