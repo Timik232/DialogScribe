@@ -1,0 +1,30 @@
+# Gitleaks findings review 2026-09-04 (Task 1 CI gate).
+# All 23 hits are DOCUMENTATION EXAMPLES of authentication headers/tokens
+# in user-facing API docs (frontend/src/routes/docs/+page.svelte and
+# frontend/src/lib/components/docs/data.ts): placeholders like
+# YOUR_ACCESS_TOKEN and truncated example JWTs (eyJhbGciOiJIUzI1NiIs...).
+# No real credentials. Entries are per-fingerprint; remove if files change.
+
+/repo/frontend/src/lib/components/docs/data.ts:curl-auth-header:51
+/repo/frontend/src/lib/components/docs/data.ts:curl-auth-header:102
+/repo/frontend/src/lib/components/docs/data.ts:curl-auth-header:146
+/repo/frontend/src/lib/components/docs/data.ts:curl-auth-header:182
+/repo/frontend/src/lib/components/docs/data.ts:curl-auth-header:218
+/repo/frontend/src/lib/components/docs/data.ts:curl-auth-header:262
+/repo/frontend/src/lib/components/docs/data.ts:curl-auth-header:300
+/repo/frontend/src/lib/components/docs/data.ts:curl-auth-header:330
+/repo/frontend/src/lib/components/docs/data.ts:curl-auth-header:378
+/repo/frontend/src/lib/components/docs/data.ts:curl-auth-header:485
+/repo/frontend/src/lib/components/docs/data.ts:curl-auth-header:518
+/repo/frontend/src/lib/components/docs/data.ts:curl-auth-header:567
+/repo/frontend/src/lib/components/docs/data.ts:curl-auth-header:605
+/repo/frontend/src/lib/components/docs/data.ts:curl-auth-header:626
+/repo/frontend/src/lib/components/docs/data.ts:curl-auth-header:651
+/repo/frontend/src/lib/components/docs/data.ts:generic-api-key:737
+/repo/frontend/src/lib/components/docs/data.ts:generic-api-key:763
+/repo/frontend/src/lib/components/docs/data.ts:curl-auth-header:777
+/repo/frontend/src/lib/components/docs/data.ts:curl-auth-header:796
+/repo/frontend/src/lib/components/docs/data.ts:curl-auth-header:825
+/repo/frontend/src/lib/components/docs/data.ts:curl-auth-header:857
+/repo/frontend/src/routes/docs/+page.svelte:curl-auth-header:86
+/repo/frontend/src/routes/docs/+page.svelte:curl-auth-header:96
