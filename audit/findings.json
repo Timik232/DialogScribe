@@ -15,11 +15,11 @@
       "severity": "Critical",
       "affected_artifact": "gigaam_transcriber/mindmap.py, gigaam_transcriber/autoflow.py, api.py",
       "description": "Global unbounded _mindmap_store, fixed autoflow UID, unauthenticated retrieval cause cross-user disclosure",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 2 / Release A",
-      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-2-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-2-verification.txt",
+      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && JWT_SECRET=ci-test-only pytest tests/test_api_spa_routing.py -q",
+      "evidence_path": ".sisyphus/evidence/task-2-traversal.txt",
       "expiry": ""
     },
     {
@@ -407,11 +407,11 @@
       "severity": "Critical",
       "affected_artifact": "api.py:spa_fallback",
       "description": "SPA catch-all permits unauthenticated arbitrary file read without resolved-path containment",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 2 / Release A",
-      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-2-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-2-verification.txt",
+      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && JWT_SECRET=ci-test-only pytest tests/test_api_spa_routing.py -q",
+      "evidence_path": ".sisyphus/evidence/task-2-traversal.txt",
       "expiry": ""
     },
     {
