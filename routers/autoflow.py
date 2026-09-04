@@ -144,9 +144,6 @@ async def autoflow_ws(ws: WebSocket):
         if result.summary_text:
             response_data["summary"] = result.summary_text
 
-        if result.mindmap_html:
-            response_data["mindmap_html"] = result.mindmap_html
-
         if result.mindmap_md:
             response_data["mindmap_md"] = result.mindmap_md
 

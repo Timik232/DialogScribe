@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from gigaam_transcriber.data_models import TranscriptionResult
 from gigaam_transcriber.insights import extract_action_items, generate_suggested_steps
 from gigaam_transcriber.summarizer import LLMClient, generate_summary, SUMMARY_TEMPLATES
-from gigaam_transcriber.mindmap import generate_mindmap_markdown, render_mindmap_html
+from gigaam_transcriber.mindmap import generate_mindmap_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 class AutoflowResult:
     transcription_result: Optional[TranscriptionResult] = None
     summary_text: str = ""
-    mindmap_html: str = ""
     mindmap_md: str = ""
     action_items: Optional[dict] = None
     suggested_steps: Optional[dict] = None
@@ -112,10 +111,8 @@ async def run_autoflow(
         try:
             t0 = time.monotonic()
             md = generate_mindmap_markdown(transcription_text, llm_client)
-            html = render_mindmap_html(md, uid="autoflow")
             result.stage_timings["mindmap"] = time.monotonic() - t0
             result.mindmap_md = md
-            result.mindmap_html = html
         except Exception as e:
             logger.exception("Autoflow: mindmap failed")
             result.errors.append(f"Майндмэп: {e}")

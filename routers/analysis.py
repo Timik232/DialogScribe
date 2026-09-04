@@ -1,15 +1,10 @@
-import uuid
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gigaam_transcriber.auth import get_current_user
 from gigaam_transcriber.database import get_db
-from gigaam_transcriber.mindmap import (
-    generate_mindmap_markdown,
-    render_mindmap_html,
-)
+from gigaam_transcriber.mindmap import generate_mindmap_markdown
 from gigaam_transcriber.chat import chat_with_transcript
 from gigaam_transcriber.insights import (
     extract_action_items,
@@ -103,10 +98,8 @@ async def post_mindmap(
 
     try:
         md_result = generate_mindmap_markdown(body.text, llm_client, model=body.model)
-        uid = uuid.uuid4().hex[:12]
-        mindmap_html = render_mindmap_html(md_result, uid=uid)
         await track_usage(db, user.id, "llm_call", 1.0)
-        return {"mindmap_markdown": md_result, "mindmap_uid": uid, "mindmap_html": mindmap_html}
+        return {"mindmap_markdown": md_result}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ConnectionError as exc:
