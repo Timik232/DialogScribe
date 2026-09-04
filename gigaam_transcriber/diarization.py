@@ -43,6 +43,7 @@ class DiarizationManager:
         """
         self.hf_token = hf_token or os.getenv("HF_TOKEN")
         self.device = self._resolve_device(device)
+        logger.info("Диаризация pyannote: устройство %s", self.device)
         self.min_speakers = min_speakers
         self.max_speakers = max_speakers
         
@@ -397,6 +398,7 @@ class HybridDiarization:
             import torch
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
+        logger.info("Гибридная диаризация: устройство %s", self.device)
         self.num_clusters = num_clusters
         
         self._embedding_model = None
