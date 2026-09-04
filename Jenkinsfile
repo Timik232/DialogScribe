@@ -70,7 +70,7 @@ pipeline {
                 sh '''
                     docker run --rm \
                         --user "$(id -u):$(id -g)" \
-                        -e PYTHONDONTWRITEBYTECODE=1 \
+                        -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp \
                         -v "$HOST_WORKSPACE:/workspace" -w /workspace \
                         "$PYTHON_IMAGE" \
                         python tools/validate_audit_matrix.py audit/findings.json \
@@ -84,7 +84,7 @@ pipeline {
                 sh '''
                     docker run --rm \
                         --user "$(id -u):$(id -g)" \
-                        -e PYTHONDONTWRITEBYTECODE=1 \
+                        -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp \
                         -e JWT_SECRET \
                         -v "$HOST_WORKSPACE:/workspace" -w /workspace \
                         "$PYTHON_IMAGE" \
@@ -100,7 +100,7 @@ pipeline {
                 sh '''
                     docker run --rm \
                         --user "$(id -u):$(id -g)" \
-                        -e PYTHONDONTWRITEBYTECODE=1 \
+                        -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp \
                         -e JWT_SECRET \
                         -v "$HOST_WORKSPACE:/workspace" -w /workspace \
                         "$PYTHON_IMAGE" \
@@ -121,7 +121,7 @@ pipeline {
                 sh '''
                     docker run --rm \
                         --user "$(id -u):$(id -g)" \
-                        -e PYTHONDONTWRITEBYTECODE=1 \
+                        -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp \
                         -v "$HOST_WORKSPACE:/workspace" -w /workspace \
                         "$PYTHON_IMAGE" \
                         python -m ruff check \
@@ -147,7 +147,7 @@ pipeline {
                         > .ci-artifacts/frontend-check.log || test "$?" -eq 1
                     docker run --rm \
                         --user "$(id -u):$(id -g)" \
-                        -e PYTHONDONTWRITEBYTECODE=1 \
+                        -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp \
                         -v "$HOST_WORKSPACE:/workspace" -w /workspace \
                         "$PYTHON_IMAGE" \
                         python tools/verify_frontend_baseline.py .ci-artifacts/frontend-check.log
