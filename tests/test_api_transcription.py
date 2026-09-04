@@ -17,6 +17,16 @@ def client():
     ):
         from api import app
 
+        import asyncio
+
+        from gigaam_transcriber.database import Base, engine
+
+        async def _create_tables():
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+
+        asyncio.run(_create_tables())
+
         setup_auth_override(app)
         with TestClient(app) as c:
             yield c, mock_transcriber
