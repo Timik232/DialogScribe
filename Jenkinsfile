@@ -144,7 +144,7 @@ pipeline {
                         -e NPM_CONFIG_REGISTRY \
                         -v "$HOST_WORKSPACE/frontend:/app" -w /app \
                         node:20-slim \
-                        sh -lc 'npm ci --cache /tmp/npm-cache && npx svelte-check --tsconfig ./tsconfig.json --output machine' \
+                        sh -lc 'npm ci --cache /tmp/npm-cache && npx svelte-kit sync && ls -la .svelte-kit/tsconfig.json && npx svelte-check --tsconfig ./tsconfig.json --output machine' \
                         > .ci-artifacts/frontend-check.log || test "$?" -eq 1
                     docker run --rm \
                         --user "$(id -u):$(id -g)" \
