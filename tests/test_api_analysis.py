@@ -33,11 +33,11 @@ def _mock_llm(api_key="test-key", model="default-model", base_url="http://test")
 class TestSummary:
     def test_successful_summary(self, client):
         mock_llm = _mock_llm()
+        markdown = "# Summary\n\n- Key point\n\n<script>alert(1)</script>"
 
         with (
             patch("routers.analysis.llm_client", mock_llm),
-            patch("routers.analysis.generate_summary", new=AsyncMock(return_value="# Summary\n\nKey points.")),
-            patch("routers.analysis.summary_to_html", return_value="<h1>Summary</h1>"),
+            patch("routers.analysis.generate_summary", new=AsyncMock(return_value=markdown)),
         ):
             resp = client.post(
                 "/api/summary",
@@ -46,8 +46,8 @@ class TestSummary:
 
         assert resp.status_code == 200
         data = resp.json()
-        assert data["summary_markdown"] == "# Summary\n\nKey points."
-        assert data["summary_html"] == "<h1>Summary</h1>"
+        assert data == {"summary_markdown": markdown}
+        assert not any(key.endswith("_html") for key in data)
 
     def test_summary_with_custom_model(self, client):
         mock_llm = _mock_llm()
@@ -55,7 +55,6 @@ class TestSummary:
         with (
             patch("routers.analysis.llm_client", mock_llm),
             patch("routers.analysis.generate_summary", new=AsyncMock(return_value="Result")),
-            patch("routers.analysis.summary_to_html", return_value="<p>Result</p>"),
         ):
             resp = client.post(
                 "/api/summary",
@@ -63,6 +62,7 @@ class TestSummary:
             )
 
         assert resp.status_code == 200
+        assert resp.json() == {"summary_markdown": "Result"}
         mock_llm.update_config.assert_not_called()
 
     def test_llm_not_configured(self, client):
@@ -136,9 +136,8 @@ class TestMindmap:
 
         assert resp.status_code == 200
         data = resp.json()
-        assert data["mindmap_markdown"] == "# Root\n## Branch"
-        assert "mindmap_uid" not in data
-        assert "mindmap_html" not in data
+        assert data == {"mindmap_markdown": "# Root\n## Branch"}
+        assert not any(key.endswith("_html") for key in data)
 
     def test_mindmap_llm_not_configured(self, client):
         mock_llm = _mock_llm(api_key="")

@@ -14,7 +14,6 @@ from gigaam_transcriber.summarizer import (
     LLMClient,
     generate_summary,
     get_available_models,
-    summary_to_html,
 )
 from gigaam_transcriber.limits import check_limit
 from gigaam_transcriber.models import User
@@ -75,9 +74,8 @@ async def post_summary(
 
     try:
         md_result = await generate_summary(body.text, body.template_key, llm_client, model=body.model)
-        html_result = summary_to_html(md_result)
         await track_usage(db, user.id, "llm_call", 1.0)
-        return {"summary_markdown": md_result, "summary_html": html_result}
+        return {"summary_markdown": md_result}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ConnectionError as exc:
