@@ -44,7 +44,7 @@ pipeline {
                     fi
                     mkdir -p .ci-artifacts
                     chmod 0777 .ci-artifacts
-                    printf '%s\n' "$GIT_REF" > .ci-artifacts/verified-commit.txt
+                    echo "$GIT_REF" > .ci-artifacts/verified-commit.txt
                 '''
             }
         }
