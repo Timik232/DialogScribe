@@ -33,6 +33,7 @@ pipeline {
                     git clone --no-tags "$GIT_URL" .
                     git checkout --detach "$GIT_REF"
                     mkdir -p .ci-artifacts
+                    chmod 0777 .ci-artifacts
                     git rev-parse HEAD > .ci-artifacts/verified-commit.txt
                 '''
             }
