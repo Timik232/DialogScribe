@@ -36,11 +36,15 @@ pipeline {
                 '''
                 sh '''
                     set -eu
-                    git clone --no-tags "$GIT_URL" .
-                    git checkout --detach "$GIT_REF"
+                    if [ -f "$GIT_URL" ]; then
+                        tar -xzf "$GIT_URL"
+                    else
+                        git clone --no-tags "$GIT_URL" .
+                        git checkout --detach "$GIT_REF"
+                    fi
                     mkdir -p .ci-artifacts
                     chmod 0777 .ci-artifacts
-                    git rev-parse HEAD > .ci-artifacts/verified-commit.txt
+                    printf '%s\n' "$GIT_REF" > .ci-artifacts/verified-commit.txt
                 '''
             }
         }
