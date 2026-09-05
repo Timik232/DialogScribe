@@ -9,10 +9,48 @@ import pytest
 import soundfile as sf
 from unittest.mock import AsyncMock, MagicMock
 
-from gigaam_transcriber.asr_provider import FallbackASRProvider, get_asr_provider
+from gigaam_transcriber.asr_provider import (
+    ASRProviderBase,
+    FallbackASRProvider,
+    get_asr_provider,
+)
+from gigaam_transcriber.data_models import TranscriptionSegment
 from gigaam_transcriber.exceptions import ASRError
 from gigaam_transcriber.litellm_client import LiteLLMASRClient
 from gigaam_transcriber.mistral_client import MistralASRClient
+
+
+class _RecordingProvider(ASRProviderBase):
+    """Реальный async-провайдер, записывающий все вызовы (спай)."""
+
+    def __init__(self, result: str = "ok", exc: Exception | None = None):
+        self.calls: list[tuple] = []
+        self._result = result
+        self._exc = exc
+
+    async def transcribe(self, audio_path, language=None, diarization=True, denoise=False) -> str:
+        self.calls.append(("transcribe", audio_path, language, diarization, denoise))
+        if self._exc is not None:
+            raise self._exc
+        return self._result
+
+    async def transcribe_raw(self, audio_bytes, filename, language=None) -> str:
+        self.calls.append(("transcribe_raw", filename, language))
+        if self._exc is not None:
+            raise self._exc
+        return self._result
+
+    async def transcribe_segments(self, audio_path, segments, language=None) -> list[TranscriptionSegment]:
+        self.calls.append(("transcribe_segments", audio_path, language))
+        if self._exc is not None:
+            raise self._exc
+        return [
+            TranscriptionSegment(text=self._result, start=s["start"], end=s["end"], speaker=s.get("speaker"))
+            for s in segments
+        ]
+
+    async def close(self) -> None:
+        self.calls.append(("close",))
 
 
 def _make_mistral_client(text: str = "текст") -> MistralASRClient:
@@ -70,6 +108,70 @@ def test_unknown_provider_defaults_to_litellm():
         assert provider._primary_name == "litellm"
     finally:
         asyncio.run(provider.close())
+
+
+def test_fallback_transcribe_forwards_all_options_to_both_providers(tmp_path):
+    """CQ-H3: language/diarization/denoise доезжают и до primary, и до fallback."""
+    audio = str(tmp_path / "a.wav")
+    failing = _RecordingProvider(exc=ASRError("primary down"))
+    secondary = _RecordingProvider(result="fallback text")
+    provider = FallbackASRProvider(
+        primary=failing, secondary=secondary,
+        primary_name="mistral", secondary_name="litellm",
+    )
+
+    result = asyncio.run(
+        provider.transcribe(audio, language="en", diarization=False, denoise=True)
+    )
+
+    assert result == "fallback text"
+    expected = ("transcribe", audio, "en", False, True)
+    assert failing.calls[0] == expected
+    assert secondary.calls[0] == expected
+
+
+def test_fallback_transcribe_segments_forwards_language_to_secondary(tmp_path):
+    """CQ-H3: при падении primary сегментный путь передает language в fallback."""
+    audio = str(tmp_path / "a.wav")
+    failing = _RecordingProvider(exc=ASRError("primary down"))
+    secondary = _RecordingProvider(result="seg-text")
+    provider = FallbackASRProvider(
+        primary=failing, secondary=secondary,
+        primary_name="mistral", secondary_name="litellm",
+    )
+    segments = [{"start": 0.0, "end": 1.0, "speaker": "SPK"}]
+
+    result = asyncio.run(provider.transcribe_segments(audio, segments, language="de"))
+
+    assert result[0].text == "seg-text"
+    assert failing.calls[0] == ("transcribe_segments", audio, "de")
+    assert secondary.calls[0] == ("transcribe_segments", audio, "de")
+
+
+def test_fallback_transcribe_raw_forwards_language_to_both(tmp_path):
+    """CQ-H3: transcribe_raw передает language обоим провайдерам."""
+    failing = _RecordingProvider(exc=ASRError("primary down"))
+    secondary = _RecordingProvider(result="raw text")
+    provider = FallbackASRProvider(
+        primary=failing, secondary=secondary,
+        primary_name="mistral", secondary_name="litellm",
+    )
+
+    result = asyncio.run(provider.transcribe_raw(b"bytes", "file.webm", language="fr"))
+
+    assert result == "raw text"
+    assert failing.calls[0] == ("transcribe_raw", "file.webm", "fr")
+    assert secondary.calls[0] == ("transcribe_raw", "file.webm", "fr")
+
+
+def test_mistral_client_transcribe_accepts_contract_kwargs(tmp_path):
+    """MistralASRClient.transcribe принимает language/diarization/denoise без TypeError."""
+    client = _make_mistral_client("contract ok")
+    audio_path = str(tmp_path / "a.wav")
+
+    result = client.transcribe(audio_path, language="ru", diarization=False, denoise=True)
+
+    assert result == "contract ok"
 
 
 def test_litellm_transcribe_segments_slices_audio(tmp_path):

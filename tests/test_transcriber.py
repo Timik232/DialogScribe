@@ -365,6 +365,110 @@ class TestGigaAMTranscriberMocked:
         assert len(results) == 3
 
 
+class TestASROptionForwarding:
+    """CQ-H3: language/denoise доезжают до провайдера во всех путях транскрипции."""
+
+    @pytest.fixture
+    def forwarding_transcriber(self):
+        transcriber = GigaAMTranscriber(api_key="test-key", hf_token="hf-token")
+
+        mock_provider = MagicMock()
+        mock_provider.transcribe.return_value = "Текст"
+        mock_provider.transcribe_segments.return_value = [
+            TranscriptionSegment(text="Сегмент", start=0.0, end=2.0, speaker="Спикер_0"),
+        ]
+
+        mock_processor = MagicMock()
+        mock_processor.is_supported_file.return_value = True
+        mock_processor.is_video_file.return_value = False
+        mock_processor.get_duration.return_value = 10.0
+        mock_processor.get_media_info.return_value = {"sample_rate": 16000, "channels": 1}
+
+        transcriber._audio_processor = mock_processor
+        transcriber._mock_provider = mock_provider
+
+        with patch(
+            "gigaam_transcriber.transcriber.get_asr_provider",
+            return_value=mock_provider,
+        ):
+            yield transcriber, mock_provider
+
+    def test_short_path_forwards_options(self, forwarding_transcriber, temp_dir):
+        transcriber, provider = forwarding_transcriber
+        audio_file = temp_dir / "test.wav"
+        audio_file.write_bytes(b"fake audio")
+
+        result = transcriber.transcribe(
+            audio_file, diarization="none", language="en", denoise="rnnoise",
+        )
+
+        assert result.language == "en"
+        provider.transcribe.assert_called_once()
+        kwargs = provider.transcribe.call_args.kwargs
+        assert kwargs["language"] == "en"
+        assert kwargs["diarization"] is False
+        assert kwargs["denoise"] is True
+
+    def test_chunked_path_forwards_options(self, forwarding_transcriber, temp_dir):
+        transcriber, provider = forwarding_transcriber
+        audio_file = temp_dir / "long.wav"
+        audio_file.write_bytes(b"fake audio")
+        transcriber.chunk_threshold = 5.0
+        chunk1 = temp_dir / "chunk_0.wav"
+        chunk2 = temp_dir / "chunk_1.wav"
+        chunk1.write_bytes(b"c1")
+        chunk2.write_bytes(b"c2")
+        transcriber._audio_processor.split_audio.return_value = [
+            (chunk1, 0.0, 5.0), (chunk2, 5.0, 10.0),
+        ]
+
+        transcriber.transcribe(
+            audio_file, diarization="none", language="fr", denoise="none",
+        )
+
+        assert provider.transcribe.call_count == 2
+        for call in provider.transcribe.call_args_list:
+            assert call.kwargs["language"] == "fr"
+            assert call.kwargs["diarization"] is False
+            assert call.kwargs["denoise"] is False
+
+    def test_video_path_forwards_options(self, forwarding_transcriber, temp_dir):
+        transcriber, provider = forwarding_transcriber
+        video_file = temp_dir / "test.mp4"
+        video_file.write_bytes(b"fake video")
+        extracted = temp_dir / "extracted.wav"
+        extracted.write_bytes(b"fake extracted audio")
+        transcriber._audio_processor.is_video_file.return_value = True
+        transcriber._audio_processor.extract_audio_from_video.return_value = extracted
+
+        transcriber.transcribe(
+            video_file, diarization="none", language="de", denoise="none",
+        )
+
+        provider.transcribe.assert_called_once()
+        kwargs = provider.transcribe.call_args.kwargs
+        assert kwargs["language"] == "de"
+
+    def test_diarized_path_forwards_language(self, forwarding_transcriber, temp_dir):
+        from gigaam_transcriber.data_models import SpeakerSegment
+
+        transcriber, provider = forwarding_transcriber
+        audio_file = temp_dir / "test.wav"
+        audio_file.write_bytes(b"fake audio")
+        transcriber._diarization_manager = MagicMock()
+        transcriber._diarization_manager.diarize.return_value = [
+            SpeakerSegment(start=0.0, end=2.0, speaker="Спикер_0"),
+        ]
+
+        result = transcriber.transcribe(
+            audio_file, diarization="pyannote", language="es", denoise="none",
+        )
+
+        assert result.language == "es"
+        provider.transcribe_segments.assert_called_once()
+        assert provider.transcribe_segments.call_args.kwargs["language"] == "es"
+
+
 class TestGigaAMTranscriberASRError:
     """Тесты обработки ошибок ASR."""
 
