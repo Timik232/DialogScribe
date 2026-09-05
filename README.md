@@ -123,6 +123,7 @@ python -m pytest -m "not slow and not requires_gpu and not requires_hf_token and
 | `POST /api/insights` | Извлечение инсайтов (LLM) |
 | `POST /api/chat` | Чат с контекстом транскрипции |
 | `WS /api/live-hints/ws` | Live-подсказки в реальном времени (WebSocket, JWT auth via query param) |
+| `GET/PUT /api/settings/asr-provider` | Настройка ASR-провайдера пользователя (mistral/litellm, по умолчанию litellm) |
 | `GET /api/models` | Список доступных LLM-моделей |
 | Auth routes | Регистрация, логин, восстановление пароля |
 | Admin routes | Управление пользователями, лимитами |
@@ -168,7 +169,8 @@ DialogScribe/
 │   ├── autoflow.py            # Автопотоки
 │   ├── live_hints.py          # Подсказки в реальном времени
 │   ├── usage.py               # Отслеживание использования
-│   └── saved_transcriptions.py# Сохранённые транскрипции
+│   ├── saved_transcriptions.py# Сохранённые транскрипции
+│   └── settings.py            # Настройки пользователя (ASR-провайдер)
 ├── gigaam_transcriber/        # Ядро транскрипции
 │   ├── transcriber.py         # GigaAMTranscriber → MistralASRClient
 │   ├── diarization.py         # pyannote диаризация

@@ -5,25 +5,25 @@ import time
 
 import numpy as np
 import soundfile as sf
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from gigaam_transcriber.asr_provider import ASRProvider, _create_provider
+from gigaam_transcriber.asr_provider import ASRProvider, DEFAULT_ASR_PROVIDER, _create_provider
 from gigaam_transcriber.auth import get_current_user
 from gigaam_transcriber.database import get_db
 from gigaam_transcriber.models import User, UserSettings
 
-router = APIRouter(tags=["settings"])
+router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
 class ASRProviderRequest(BaseModel):
-    provider: str
+    provider: ASRProvider
 
 
 class ASRProviderResponse(BaseModel):
-    provider: str
+    provider: ASRProvider
 
 
 @router.get("/asr-provider", response_model=ASRProviderResponse)
@@ -37,9 +37,13 @@ async def get_asr_provider(
     settings = result.scalar_one_or_none()
 
     if settings is None:
-        return ASRProviderResponse(provider="litellm")
+        return ASRProviderResponse(provider=DEFAULT_ASR_PROVIDER)
 
-    return ASRProviderResponse(provider=settings.asr_provider)
+    try:
+        stored = ASRProvider(settings.asr_provider)
+    except ValueError:
+        stored = DEFAULT_ASR_PROVIDER
+    return ASRProviderResponse(provider=stored)
 
 
 @router.put("/asr-provider", response_model=ASRProviderResponse)
@@ -48,30 +52,25 @@ async def set_asr_provider(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    try:
-        ASRProvider(body.provider)  # noqa: B018
-    except ValueError:
-        valid = [p.value for p in ASRProvider]
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid provider '{body.provider}'. Must be one of: {valid}",
-        )
-
     result = await db.execute(
         select(UserSettings).where(UserSettings.user_id == user.id)
     )
     settings = result.scalar_one_or_none()
 
     if settings is None:
-        settings = UserSettings(user_id=user.id, asr_provider=body.provider)
+        settings = UserSettings(user_id=user.id, asr_provider=body.provider.value)
         db.add(settings)
     else:
-        settings.asr_provider = body.provider
+        settings.asr_provider = body.provider.value
 
     await db.flush()
     await db.commit()
 
-    return ASRProviderResponse(provider=settings.asr_provider)
+    try:
+        stored = ASRProvider(settings.asr_provider)
+    except ValueError:
+        stored = body.provider
+    return ASRProviderResponse(provider=stored)
 
 
 @router.get("/asr-test")

@@ -21,6 +21,10 @@ class ASRProvider(str, enum.Enum):
     LITELLM = "litellm"
 
 
+# Single source of truth for the default provider: ORM default, factory, settings router and frontend all consume this.
+DEFAULT_ASR_PROVIDER: ASRProvider = ASRProvider.LITELLM
+
+
 class ASRProviderBase(abc.ABC):
     """Abstract base for ASR providers.
 
@@ -92,7 +96,10 @@ class FallbackASRProvider(ASRProviderBase):
         denoise: bool = False,
     ) -> str:
         try:
-            return await self._invoke(self._primary, "transcribe", audio_path)
+            return await self._invoke(
+                self._primary, "transcribe", audio_path,
+                language=language, diarization=diarization, denoise=denoise,
+            )
         except Exception as primary_exc:
             logger.warning(
                 "ASR primary provider %s failed (transcribe), falling back to %s: %s",
@@ -100,7 +107,10 @@ class FallbackASRProvider(ASRProviderBase):
                 self._secondary_name,
                 primary_exc,
             )
-            return await self._invoke(self._secondary, "transcribe", audio_path)
+            return await self._invoke(
+                self._secondary, "transcribe", audio_path,
+                language=language, diarization=diarization, denoise=denoise,
+            )
 
     async def transcribe_raw(
         self,
@@ -197,12 +207,12 @@ def get_asr_provider(
         ASRError: If both providers fail (when fallback is enabled).
     """
     # Resolve preference → enum
-    pref = (preference or "litellm").strip().lower()
+    pref = (preference or DEFAULT_ASR_PROVIDER.value).strip().lower()
     try:
         primary_enum = ASRProvider(pref)
     except ValueError:
-        logger.warning("Unknown ASR provider %r, defaulting to litellm", preference)
-        primary_enum = ASRProvider.LITELLM
+        logger.warning("Unknown ASR provider %r, defaulting to %s", preference, DEFAULT_ASR_PROVIDER.value)
+        primary_enum = DEFAULT_ASR_PROVIDER
 
     primary = _create_provider(primary_enum, max_retries)
 

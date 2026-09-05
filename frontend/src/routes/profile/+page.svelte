@@ -22,7 +22,7 @@
 	let limits: LimitInfo[] = $state([]);
 	let loading = $state(true);
 	let period = $state('monthly');
-	let asrProvider = $state('mistral');
+	let asrProvider = $state('litellm');
 	let asrProviderLoading = $state(true);
 	let asrProviderMsg = $state<{ text: string; type: 'success' | 'error' } | null>(null);
 
@@ -30,9 +30,9 @@
 		asrProviderLoading = true;
 		try {
 			const data = await fetchApi<{ provider: string }>('GET', '/api/settings/asr-provider');
-			asrProvider = data.provider || 'mistral';
+			asrProvider = data.provider || 'litellm';
 		} catch {
-			asrProvider = 'mistral';
+			asrProvider = 'litellm';
 		} finally {
 			asrProviderLoading = false;
 		}

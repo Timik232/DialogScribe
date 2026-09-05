@@ -4,6 +4,7 @@ from datetime import datetime
 from sqlalchemy import JSON, Boolean, Column, DateTime, Float, ForeignKey, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from gigaam_transcriber.asr_provider import DEFAULT_ASR_PROVIDER
 from gigaam_transcriber.database import Base
 
 
@@ -149,6 +150,11 @@ class UserSettings(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     user_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False, index=True)
-    asr_provider: Mapped[str] = mapped_column(String(100), nullable=False, default="litellm")
+    asr_provider: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        default=DEFAULT_ASR_PROVIDER.value,
+        server_default=DEFAULT_ASR_PROVIDER.value,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow, onupdate=_utcnow)

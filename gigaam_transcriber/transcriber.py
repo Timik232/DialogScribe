@@ -221,6 +221,7 @@ class GigaAMTranscriber:
                     diarization=diarization,
                     keep_temp_audio=False,
                     denoise=denoise,
+                    language=language,
                     **diarization_kwargs,
                 )
             else:
@@ -229,6 +230,7 @@ class GigaAMTranscriber:
                     provider=provider,
                     diarization=diarization,
                     denoise=denoise,
+                    language=language,
                     **diarization_kwargs,
                 )
         finally:
@@ -268,10 +270,16 @@ class GigaAMTranscriber:
         provider: Any,
         diarization: DiarizationMode = "none",
         denoise: str = "none",
+        language: str = "ru",
         **diarization_kwargs: Any,
     ) -> TranscriptionResult:
         """Внутренний метод транскрипции аудио через ASR провайдер."""
         temp_audio: Optional[Path] = None
+        asr_kwargs: Dict[str, Any] = {
+            "language": language,
+            "diarization": diarization != "none",
+            "denoise": denoise not in ("none", "", None),
+        }
         try:
             working_audio, temp_audio = self._prepare_audio(audio_path, denoise=denoise)
             duration = self.audio_processor.get_duration(working_audio)
@@ -279,9 +287,13 @@ class GigaAMTranscriber:
             segments: List[TranscriptionSegment]
             if diarization == "none":
                 if duration >= self.chunk_threshold:
-                    text = self._transcribe_chunked(working_audio, duration, provider=provider)
+                    text = self._transcribe_chunked(
+                        working_audio, duration, provider=provider, **asr_kwargs,
+                    )
                 else:
-                    text = _call_provider(provider, "transcribe", str(working_audio)).strip()
+                    text = _call_provider(
+                        provider, "transcribe", str(working_audio), **asr_kwargs,
+                    ).strip()
                 if not text:
                     raise EmptyAudioError(str(audio_path))
                 segments = [
@@ -306,6 +318,7 @@ class GigaAMTranscriber:
                 ]
                 api_segments = _call_provider(
                     provider, "transcribe_segments", str(working_audio), segment_dicts,
+                    language=language,
                 )
                 segments = [
                     TranscriptionSegment(
@@ -325,7 +338,7 @@ class GigaAMTranscriber:
                 text=full_text,
                 segments=segments,
                 duration=duration,
-                language="ru",
+                language=language,
                 model_name=self.asr_model,
                 processing_time=0,
                 metadata={"source": str(audio_path)},
@@ -337,7 +350,14 @@ class GigaAMTranscriber:
                 except Exception:
                     pass
 
-    def _transcribe_chunked(self, audio_path: Path, duration: float, *, provider: Any) -> str:
+    def _transcribe_chunked(
+        self,
+        audio_path: Path,
+        duration: float,
+        *,
+        provider: Any,
+        **asr_kwargs: Any,
+    ) -> str:
         chunks = self.audio_processor.split_audio(
             audio_path,
             chunk_duration=self.chunk_duration,
@@ -346,7 +366,7 @@ class GigaAMTranscriber:
         try:
 
             def _transcribe_one(idx: int, chunk_path: Path) -> tuple[int, str]:
-                text = _call_provider(provider, "transcribe", str(chunk_path))
+                text = _call_provider(provider, "transcribe", str(chunk_path), **asr_kwargs)
                 return idx, text.strip() if text else ""
 
             texts: List[tuple[int, str]] = []

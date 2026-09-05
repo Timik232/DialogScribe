@@ -193,8 +193,12 @@ class MistralASRClient(ASRProviderBase):
         audio_path: str,
         start: float | None = None,
         end: float | None = None,
+        language: str | None = None,
+        diarization: bool = True,
+        denoise: bool = False,
     ) -> str:
         """Транскрипция всего файла или указанного сегмента."""
+        _ = language, diarization, denoise  # часть контракта ASRProviderBase; Voxtral определяет язык сам
         logger.info(
             "ASR transcribe: start=%.2f end=%.2f [path=%s]",
             start if start is not None else 0.0,

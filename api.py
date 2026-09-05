@@ -182,7 +182,7 @@ def create_transcription(
         raise _handle_transcription_exception(e)
 
 
-from routers import admin, analysis, autoflow, exports, live_hints, meeting_prep, saved_transcriptions, templates, transcription, usage  # noqa: E402
+from routers import admin, analysis, autoflow, exports, live_hints, meeting_prep, saved_transcriptions, settings, templates, transcription, usage  # noqa: E402
 from routers.auth import auth_router  # noqa: E402
 
 app.include_router(auth_router)
@@ -196,6 +196,7 @@ app.include_router(admin.router)
 app.include_router(saved_transcriptions.router)
 app.include_router(live_hints.router)
 app.include_router(meeting_prep.router)
+app.include_router(settings.router)
 
 
 _MINDMAP_RETIRED_DETAIL = '{"detail":"Mindmap HTML endpoints are retired"}'
