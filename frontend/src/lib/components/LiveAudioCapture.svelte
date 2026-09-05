@@ -8,7 +8,7 @@
 	}: {
 		onstart?: () => void;
 		onstop?: () => void;
-		onchunk?: (audio_b64: string, source: 'mic' | 'tab') => void;
+		onchunk?: (audio: ArrayBuffer, source: 'mic' | 'tab') => void;
 	} = $props();
 
 	let micEnabled = $state(true);
@@ -59,13 +59,9 @@
 			const completeBlob = new Blob([headerBlob, ...chunkBuffer], { type: mimeType });
 			chunkBuffer = [];
 			if (completeBlob.size < 100) return;
-			const reader = new FileReader();
-			reader.onloadend = () => {
-				const dataUrl = reader.result as string;
-				const base64 = dataUrl.split(',')[1] ?? dataUrl;
-				onchunk?.(base64, source);
-			};
-			reader.readAsDataURL(completeBlob);
+			completeBlob.arrayBuffer().then((buffer) => {
+				onchunk?.(buffer, source);
+			});
 		}
 
 		recorder.ondataavailable = (e: BlobEvent) => {

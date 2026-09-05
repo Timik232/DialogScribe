@@ -111,7 +111,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from gigaam_transcriber.auth import TokenValidationError, decode_access_token
+from gigaam_transcriber import auth as _auth
 from gigaam_transcriber.database import async_session_factory
 from gigaam_transcriber.models import User
 
@@ -253,8 +253,8 @@ async def authenticate_websocket(
         return None
 
     try:
-        payload = decode_access_token(token)
-    except TokenValidationError:
+        payload = _auth.decode_access_token(token)
+    except _auth.TokenValidationError:
         await close_ws(ws, CLOSE_AUTH_FAILED, "invalid or expired token")
         return None
 

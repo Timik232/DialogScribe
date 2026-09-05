@@ -3,6 +3,7 @@
 	import SafeMarkdown from '$lib/components/SafeMarkdown.svelte';
 	import MindmapViewer from '$lib/components/MindmapViewer.svelte';
 	import { fetchApi, fetchApiBlob } from '$lib/services/api';
+	import { authStore } from '$lib/stores/auth';
 
 	interface Template {
 		slug: string;
@@ -36,6 +37,7 @@
 	}
 
 	interface ProgressMessage {
+		type?: 'auth_ok' | 'ack' | 'status' | 'progress' | 'complete' | 'error';
 		stage: 'transcribing' | 'summarizing' | 'mindmap' | 'insights' | 'processing' | 'complete' | 'error';
 		progress?: number;
 		message?: string;
@@ -121,16 +123,10 @@
 		error = '';
 	}
 
-	function fileToBase64(file: File): Promise<string> {
-		return new Promise((resolve, reject) => {
-			const reader = new FileReader();
-			reader.onload = () => {
-				const dataUrl = reader.result as string;
-				resolve(dataUrl.split(',')[1]);
-			};
-			reader.onerror = reject;
-			reader.readAsDataURL(file);
-		});
+	function getAccessToken(): string {
+		let token = '';
+		authStore.subscribe((s) => (token = s.accessToken))();
+		return token;
 	}
 
 	async function startAutoflow(): Promise<void> {
@@ -145,15 +141,28 @@
 		progressMessage = 'Подключение...';
 
 		try {
-			const fileData = await fileToBase64(selectedFile);
+			const token = getAccessToken();
+			if (!token) {
+				error = 'Требуется авторизация';
+				loading = false;
+				return;
+			}
+
+			const fileBuffer = await selectedFile.arrayBuffer();
 
 			const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 			const wsUrl = `${wsProtocol}//${window.location.host}/api/autoflow/ws`;
 			const ws = new WebSocket(wsUrl);
+			ws.binaryType = 'arraybuffer';
 
 			ws.onopen = () => {
+				ws.send(JSON.stringify({ type: 'auth', token, protocol: 1 }));
+			};
+
+			const uploadFile = () => {
 				ws.send(JSON.stringify({
-					file_data: fileData,
+					type: 'meta',
+					bytes: fileBuffer.byteLength,
 					filename: selectedFile!.name,
 					template_key: templateKey,
 					diarization_mode: diarizationMode,
@@ -162,10 +171,24 @@
 					include_mindmap: true,
 					include_insights: includeInsights,
 				}));
+				const chunkSize = 256 * 1024;
+				for (let offset = 0; offset < fileBuffer.byteLength; offset += chunkSize) {
+					ws.send(fileBuffer.slice(offset, offset + chunkSize));
+				}
+				progressMessage = 'Файл отправлен, обработка...';
 			};
 
 			ws.onmessage = (event) => {
 				const msg: ProgressMessage = JSON.parse(event.data);
+
+				if (msg.type === 'auth_ok') {
+					uploadFile();
+					return;
+				}
+
+				if (msg.type === 'ack' || msg.type === 'status') {
+					return;
+				}
 
 				if (msg.stage === 'error') {
 					error = msg.message || 'Неизвестная ошибка';
@@ -190,7 +213,9 @@
 
 			ws.onclose = (event) => {
 				if (loading && !result) {
-					if (event.code !== 1000) {
+					if (event.code === 4401 || event.code === 4403 || event.code === 4408 || event.code === 4400) {
+						error = 'Ошибка авторизации WebSocket';
+					} else if (event.code !== 1000) {
 						disconnected = true;
 					}
 					loading = false;

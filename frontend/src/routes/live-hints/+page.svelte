@@ -148,9 +148,9 @@
 		}
 	}
 
-	function handleAudioChunk(audio_b64: string, source: 'mic' | 'tab'): void {
+	function handleAudioChunk(audio: ArrayBuffer, source: 'mic' | 'tab'): void {
 		if (wsClient) {
-			wsClient.sendAudioChunk(audio_b64, source);
+			wsClient.sendAudioChunk(audio, source);
 		}
 	}
 
