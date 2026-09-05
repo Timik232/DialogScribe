@@ -61,7 +61,7 @@ _cache_lock = threading.Lock()
 
 
 def _get_cache_key(text: str) -> str:
-    return hashlib.md5(text.encode()).hexdigest()
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 def _chat_cache_max_entries() -> int:
