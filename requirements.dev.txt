@@ -1,5 +1,4 @@
 # Slim dev requirements — Mistral API for transcription, no local GPU/torch/pyannote
-starlette>=0.40.0,<1.0.0
 httpx>=0.24
 numpy>=1.24
 soundfile>=0.12
@@ -7,7 +6,7 @@ ffmpeg-python>=0.2.0
 pydub>=0.25.0
 click>=8.0.0
 tqdm>=4.65.0
-fastapi>=0.115.0
+fastapi>=0.141.1,<0.142
 uvicorn[standard]>=0.30.0
 python-multipart>=0.0.9
 openai>=1.0.0
