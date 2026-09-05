@@ -6,6 +6,7 @@ import hashlib
 import logging
 import os
 import re
+import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
@@ -246,6 +247,37 @@ def format_duration_human(seconds: float) -> str:
     return " ".join(parts)
 
 
+_LLM_LOGGER_NAME = "gigaam_transcriber.llm"
+_LLM_HANDLER_LOCK = threading.Lock()
+
+
+def _attach_llm_file_handler(llm_log_path: Path) -> bool:
+    """Attach the rotating LLM file handler; idempotent per target file.
+
+    Concurrent callers for the same path end up with exactly one handler
+    (losers close their duplicate); raises PermissionError/OSError when the
+    path is not writable so setup_logging can fall back to stderr.
+    """
+    handler = RotatingFileHandler(
+        str(llm_log_path),
+        maxBytes=50 * 1024 * 1024,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+    ))
+    llm_logger = logging.getLogger(_LLM_LOGGER_NAME)
+    with _LLM_HANDLER_LOCK:
+        for existing in llm_logger.handlers:
+            if getattr(existing, "baseFilename", None) == handler.baseFilename:
+                handler.close()
+                return True
+        llm_logger.addHandler(handler)
+        llm_logger.setLevel(logging.INFO)
+    return True
+
+
 def setup_logging(
     level: int = logging.INFO,
     format_str: Optional[str] = None,
@@ -253,7 +285,7 @@ def setup_logging(
 ) -> None:
     """
     Настройка логирования.
-    
+
     Args:
         level: Уровень логирования
         format_str: Формат сообщений
@@ -261,14 +293,14 @@ def setup_logging(
     """
     if format_str is None:
         format_str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    
+
     handlers = [logging.StreamHandler()]
-    
+
     if log_file:
         log_file = Path(log_file)
         ensure_dir(log_file.parent)
         handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
-    
+
     logging.basicConfig(
         level=level,
         format=format_str,
@@ -280,21 +312,9 @@ def setup_logging(
         try:
             llm_log_path = Path(llm_log_file)
             ensure_dir(llm_log_path.parent)
-
-            llm_logger = logging.getLogger("gigaam_transcriber.llm")
-            handler = RotatingFileHandler(
-                str(llm_log_path),
-                maxBytes=50 * 1024 * 1024,
-                backupCount=3,
-                encoding="utf-8",
-            )
-            handler.setFormatter(logging.Formatter(
-                "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-            ))
-            llm_logger.addHandler(handler)
-            llm_logger.setLevel(logging.INFO)
+            _attach_llm_file_handler(llm_log_path)
         except (PermissionError, OSError):
-            logging.getLogger("gigaam_transcriber.llm").warning(
+            logging.getLogger(_LLM_LOGGER_NAME).warning(
                 "Cannot create LLM log file %s — falling back to stderr only",
                 llm_log_file,
             )
