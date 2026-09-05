@@ -1,5 +1,7 @@
 <script lang="ts">
 	import AudioUploader from '$lib/components/AudioUploader.svelte';
+	import SafeMarkdown from '$lib/components/SafeMarkdown.svelte';
+	import MindmapViewer from '$lib/components/MindmapViewer.svelte';
 	import { fetchApi, fetchApiBlob } from '$lib/services/api';
 
 	interface Template {
@@ -26,7 +28,6 @@
 	interface AutoflowResult {
 		transcription?: Transcription;
 		summary?: string;
-		mindmap_html?: string;
 		mindmap_md?: string;
 		action_items?: { action_items?: Array<{ task: string; assignee?: string | null; deadline?: string | null; priority: string }>; decisions?: Array<{ decision: string; context: string }> };
 		suggested_steps?: { suggested_steps?: Array<{ step: string; reason: string; category: string }> };
@@ -416,7 +417,7 @@
 					class="tab"
 					class:active={activeSection === 'mindmap'}
 					onclick={() => (activeSection = 'mindmap')}
-					disabled={!result.mindmap_html}
+					disabled={!result.mindmap_md}
 				>
 					<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="btn-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M9 6.75V15m6-6v8.25m.503 3.498l4.875-2.437c.381-.19.622-.58.622-1.006V4.82c0-.836-.88-1.38-1.628-1.006l-3.869 1.934c-.317.159-.69.159-1.006 0L9.503 3.252a1.125 1.125 0 00-1.006 0L3.622 5.689C3.24 5.88 3 6.27 3 6.695V19.18c0 .836.88 1.38 1.628 1.006l3.869-1.934c.317-.159.69-.159 1.006 0l4.994 2.497c.317.158.69.158 1.006 0z"/></svg>Майндмэп
 				</button>
@@ -480,16 +481,14 @@
 
 			{#if activeSection === 'summary' && result.summary}
 				<div class="section-content">
-					<div class="summary-content">
-						{@html result.summary.replace(/\n/g, '<br>')}
-					</div>
+					<SafeMarkdown class="summary-content" markdown={result.summary} />
 				</div>
 			{/if}
 
-			{#if activeSection === 'mindmap' && result.mindmap_html}
+			{#if activeSection === 'mindmap' && result.mindmap_md}
 				<div class="section-content">
 					<div class="mindmap-wrapper">
-						{@html result.mindmap_html}
+						<MindmapViewer markdown={result.mindmap_md} />
 					</div>
 				</div>
 			{/if}

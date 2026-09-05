@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { Transformer } from 'markmap-lib';
 	import { Markmap } from 'markmap-view';
+	import { sanitizeInlineHtml } from '$lib/services/safeHtml';
 
 	let { markdown = '', theme = 'light' }: { markdown: string; theme?: 'light' | 'dark' } = $props();
 
@@ -22,9 +23,19 @@
 		};
 	}
 
+	// markmap-view renders node.content via innerHTML, so every node text must
+	// be sanitized before it reaches setData().
+	type MarkmapNode = { content?: string; children?: MarkmapNode[] };
+
+	function sanitizeTree(node: MarkmapNode): void {
+		if (node.content) node.content = sanitizeInlineHtml(node.content);
+		for (const child of node.children ?? []) sanitizeTree(child);
+	}
+
 	function renderData() {
 		if (!mm || !markdown) return;
 		const { root } = transformer.transform(markdown);
+		sanitizeTree(root as MarkmapNode);
 		mm.setData(root);
 		mm.fit();
 	}
