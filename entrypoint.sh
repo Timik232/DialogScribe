@@ -37,6 +37,9 @@ trap - EXIT
 mkdir -p /app/data
 
 # Run database migrations
-alembic upgrade head
+if ! alembic upgrade head; then
+  echo "entrypoint: database migrations failed; refusing to start" >&2
+  exit 1
+fi
 
 exec python api.py
