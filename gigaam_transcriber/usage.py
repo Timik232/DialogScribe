@@ -1,9 +1,33 @@
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 
-from sqlalchemy import func, select, cast, Date
+from sqlalchemy import delete, func, select, cast, Date
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gigaam_transcriber.models import UsageEvent, User
+
+USAGE_RETENTION_DAYS = int(os.getenv("USAGE_RETENTION_DAYS", "180"))
+
+
+def usage_retention_cutoff(older_than_days: int | None = None, now: datetime | None = None) -> datetime:
+    days = USAGE_RETENTION_DAYS if older_than_days is None else older_than_days
+    return (now or datetime.utcnow()) - timedelta(days=days)
+
+
+async def prune_usage_events(
+    db: AsyncSession,
+    older_than_days: int | None = None,
+    now: datetime | None = None,
+) -> int:
+    """Delete UsageEvent rows older than the retention window and return the count.
+
+    Idempotent: re-running with the same clock deletes 0 rows. Only the
+    usage_events table is touched; no other model is affected.
+    """
+    cutoff = usage_retention_cutoff(older_than_days, now)
+    result = await db.execute(delete(UsageEvent).where(UsageEvent.created_at < cutoff))
+    await db.commit()
+    return result.rowcount or 0
 
 
 async def track_usage(

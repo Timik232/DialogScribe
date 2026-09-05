@@ -94,6 +94,11 @@ class SavedTranscription(Base):
     duration: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     language: Mapped[str] = mapped_column(String(10), nullable=False, default="ru")
     share_id: Mapped[str | None] = mapped_column(String(36), nullable=True, unique=True, default=None, index=True)
+    # Nullable share lifecycle state: NULL share_expires_at = never expires,
+    # NULL share_revoked_at = not revoked. Existing rows keep working because
+    # both columns default to NULL (additive migration 009_share_lifecycle).
+    share_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    share_revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow, onupdate=_utcnow)
 
