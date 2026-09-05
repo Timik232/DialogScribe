@@ -52,6 +52,32 @@ def create_refresh_token(user_id: str, jti: str | None = None) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
+class TokenValidationError(ValueError):
+    """A JWT failed validation (signature, expiry, or token type).
+
+    Transport-agnostic counterpart of the 401 ``HTTPException`` raised by the
+    HTTP dependency: WebSocket and other non-HTTP callers map this onto their
+    own failure signalling (e.g. close code 4401).
+    """
+
+
+def decode_access_token(token: str) -> dict:
+    """Validate an access JWT and return its payload without HTTP coupling.
+
+    Checks signature, expiry, ``type == "access"`` and presence of ``sub``.
+    Raises :class:`TokenValidationError` on any failure.
+    """
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except JWTError as exc:
+        raise TokenValidationError("Invalid or expired token") from exc
+    if payload.get("type") != "access":
+        raise TokenValidationError("Invalid token type")
+    if not payload.get("sub"):
+        raise TokenValidationError("Invalid token payload")
+    return payload
+
+
 def decode_token(token: str) -> dict:
     try:
         return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
@@ -60,29 +86,23 @@ def decode_token(token: str) -> dict:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from None
 
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    payload = decode_token(credentials.credentials)
-
-    if payload.get("type") != "access":
+    try:
+        payload = decode_access_token(credentials.credentials)
+    except TokenValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token type",
+            detail=str(exc),
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from exc
 
-    user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token payload",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    user_id = payload["sub"]
 
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
@@ -92,7 +112,7 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found",
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from None
 
     if not user.is_active:
         raise HTTPException(
