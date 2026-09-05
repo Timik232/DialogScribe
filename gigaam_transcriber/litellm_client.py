@@ -43,6 +43,7 @@ class LiteLLMASRClient(ASRProviderBase):
         self._client = httpx.AsyncClient(timeout=_TIMEOUT_SEC)
         self._client_loop_id: int | None = None
         self._loop_clients: dict[int, tuple[asyncio.AbstractEventLoop, httpx.AsyncClient]] = {}
+        self._retired_clients: list[httpx.AsyncClient] = []
         self._clients_lock = threading.Lock()
         self._closed = False
         self._max_retries = _MAX_RETRIES if max_retries is None else max(0, int(max_retries))
@@ -54,6 +55,9 @@ class LiteLLMASRClient(ASRProviderBase):
     def _prune_dead_loops_locked(self) -> None:
         for key in [k for k, (loop, _c) in self._loop_clients.items() if loop.is_closed()]:
             _loop, client = self._loop_clients.pop(key)
+            # The loop is closed, so aclose() cannot be awaited on the owning
+            # loop; retire the client for a best-effort close in close().
+            self._retired_clients.append(client)
             if client is self._client:
                 # The default client is bound to a dead loop: replace it with a
                 # fresh, unclaimed one so a future loop cannot inherit it.
@@ -94,6 +98,8 @@ class LiteLLMASRClient(ASRProviderBase):
         clients = [client for _loop, client in entries]
         if not default_claimed:
             clients.append(self._client)
+        clients.extend(self._retired_clients)
+        self._retired_clients.clear()
         for client in clients:
             try:
                 await client.aclose()

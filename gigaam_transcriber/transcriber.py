@@ -204,10 +204,16 @@ class _ProviderSession:
         semaphore = asyncio.Semaphore(limit)
 
         async def _one(args: tuple) -> Any:
-            if self._cancelled.is_set():
-                raise asyncio.CancelledError()
             async with semaphore:
-                return await method(*args, **kwargs)
+                if self._cancelled.is_set():
+                    raise asyncio.CancelledError()
+                try:
+                    return await method(*args, **kwargs)
+                except BaseException:
+                    # Set before the async-with releases the semaphore slot, so
+                    # whichever queued chunk acquires next observes the flag.
+                    self._cancelled.set()
+                    raise
 
         tasks = [asyncio.create_task(_one(args)) for args in arg_sets]
         try:
