@@ -21,6 +21,7 @@ from starlette.websockets import WebSocketDisconnect
 import gigaam_transcriber.ws_protocol as ws_protocol
 import routers.autoflow as autoflow_router
 from gigaam_transcriber.auth import create_access_token
+from gigaam_transcriber.autoflow import AutoflowStage, StageEvent
 
 USER_ID = "11111111-1111-1111-1111-111111111111"
 
@@ -60,16 +61,19 @@ def make_app(monkeypatch, tmp_dir, *, run_result=None, run_exc=None):
             raise run_exc
         cb = kwargs.get("progress_callback")
         if cb:
-            cb("Транскрибация аудио", 0.3)
+            cb(StageEvent(AutoflowStage.TRANSCRIBE, 0.3, "Транскрибация аудио"))
         return run_result or make_result()
 
     monkeypatch.setattr(autoflow_router, "run_autoflow", fake_run_autoflow)
     monkeypatch.setattr(autoflow_router, "LLMClient", MagicMock())
+    monkeypatch.setattr(autoflow_router, "check_limit", AsyncMock())
+    monkeypatch.setattr(autoflow_router, "track_usage", AsyncMock())
 
     session = MagicMock()
     session.execute = AsyncMock(
         return_value=MagicMock(scalar_one_or_none=lambda: make_user_row())
     )
+    session.commit = AsyncMock()
 
     @contextlib.asynccontextmanager
     async def auth_factory():
@@ -77,7 +81,7 @@ def make_app(monkeypatch, tmp_dir, *, run_result=None, run_exc=None):
 
     @contextlib.asynccontextmanager
     async def work_factory():
-        yield MagicMock()
+        yield session
 
     monkeypatch.setattr(ws_protocol, "async_session_factory", auth_factory)
     monkeypatch.setattr(autoflow_router, "async_session_factory", work_factory)
@@ -156,14 +160,15 @@ class TestAutoflowWsHappyPath:
                         break
 
         stages = [m.get("stage") for m in messages]
-        assert "upload_complete" in stages
+        assert AutoflowStage.UPLOAD.value in stages
         progress = [m for m in messages if m["type"] == "progress"]
-        assert progress and progress[0]["stage"] == "transcribing"
+        assert progress and progress[0]["stage"] == AutoflowStage.TRANSCRIBE.value
 
         seqs = [m["seq"] for m in messages]
         assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
         assert messages[-1]["type"] == "complete"
         assert messages[-1]["result"] is not None
+        assert messages[-1]["session_id"]
 
         captured = app.state.captured
         assert captured["user_id"] == USER_ID

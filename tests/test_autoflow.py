@@ -1,9 +1,8 @@
-from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from gigaam_transcriber.autoflow import AutoflowResult, run_autoflow
+from gigaam_transcriber.autoflow import AutoflowStage, run_autoflow
 from gigaam_transcriber.data_models import TranscriptionResult, TranscriptionSegment
 
 
@@ -78,8 +77,12 @@ class TestRunAutoflow:
             "test.mp3", "general", fake_llm, config,
             transcriber=fake_transcriber, progress_callback=progress,
         )
-        calls = progress.call_args_list
-        assert len(calls) >= 3
+        events = [c.args[0] for c in progress.call_args_list]
+        assert len(events) >= 3
+        stages = [e.stage for e in events]
+        assert AutoflowStage.TRANSCRIBE in stages
+        assert AutoflowStage.SUMMARY in stages
+        assert AutoflowStage.MINDMAP in stages
 
     @pytest.mark.asyncio
     async def test_unknown_template(self, fake_transcriber, fake_llm, config):
@@ -155,5 +158,7 @@ class TestAutoflowWithInsights:
                 include_insights=True,
             )
 
-        messages = [c[0][0] for c in progress.call_args_list]
-        assert any("инсайт" in m.lower() for m in messages)
+        events = [c.args[0] for c in progress.call_args_list]
+        assert any(e.stage is AutoflowStage.INSIGHTS for e in events)
+        skipped = [e for e in events if e.stage is AutoflowStage.SKIPPED]
+        assert skipped == []
