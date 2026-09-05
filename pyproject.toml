@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=84.0.0", "wheel>=0.46.2"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -44,7 +44,7 @@ dependencies = [
     "soundfile>=0.12.0",
     "click>=8.0.0",
     "tqdm>=4.65.0",
-    "huggingface_hub>=0.20.0",
+    "huggingface_hub>=0.23.0",
 ]
 
 [project.optional-dependencies]
