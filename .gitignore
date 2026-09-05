@@ -161,3 +161,6 @@ vault/
 # Stray files in project root
 /*.png
 my_py_venv.txt
+
+# local disaster-recovery backups (contain full DB copies)
+/backups/
