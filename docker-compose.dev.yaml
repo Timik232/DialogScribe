@@ -36,7 +36,7 @@ services:
       - FRONTEND_URL=http://localhost:5173
     volumes:
       - dialogscribe_data:/app/data
-      - hf-cache:/home/appuser/.cache/huggingface
+      - hf-cache:/home/appuser/.cache
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7860/health')"]

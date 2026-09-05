@@ -79,7 +79,7 @@ services:
       - ./samples:/app/samples:ro
       - ./vault/secrets:/etc/vault/secrets:ro
       - ./entrypoint.sh:/entrypoint.sh:ro
-      - hf-cache:/home/appuser/.cache/huggingface
+      - hf-cache:/home/appuser/.cache
     # host video/render GIDs — verify with ls -l /dev/nvidia*
     # group_add: ["44", "107"]
     deploy:

@@ -43,9 +43,12 @@ COPY --from=frontend-build /app/frontend/build /app/frontend/build
 
 RUN groupadd -g 10003 secrets \
     && useradd -u 10001 -g 10003 -m -d /home/appuser appuser \
-    && mkdir -p /app/data /home/appuser/.cache/huggingface \
+    && mkdir -p /app/data /home/appuser/.cache \
     && chown -R 10001:10003 /app /home/appuser
 
+# Model caches (pyannote uses torch.hub cache, speechbrain/hf use HF_HOME) live
+# under /home/appuser/.cache — mount a named volume on the whole directory so
+# warm caches survive restarts and enable offline start.
 ENV HF_HOME=/home/appuser/.cache/huggingface
 USER 10001
 
