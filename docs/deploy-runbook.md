@@ -14,6 +14,19 @@
 Production cutover happens through the Task 20 canary; do not promote this
 stack directly without that canary.
 
+## Ingress architecture
+
+The application container is not published to the host. The `ingress-guard`
+nginx container publishes `192.168.1.48:7860` and proxies to the app over the
+Compose network. Its allow list accepts the Synology reverse proxy
+(`192.168.1.47`), local operations (`127.0.0.1` and `192.168.1.48`), and
+Docker bridge health checks (`172.16.0.0/12`). External access is through
+`https://dialogscribe.komolov.synology.me`; direct LAN access is intentionally
+rejected with HTTP 403.
+
+To allow another source, add it to `deploy/ingress-guard.conf` and apply the
+guard configuration with `docker compose up -d ingress-guard`.
+
 ## Rollback
 
 Revert the compose and image changes to the last known-good revision, then
