@@ -288,6 +288,36 @@ class ModelCacheTestCase(unittest.TestCase):
             _model_cache.keys(),
         )
 
+    def test_pyannote_cold_cache_loads_before_inference_lock(self):
+        calls = []
+
+        class FakeAnnotation:
+            def itertracks(self, yield_label=False):
+                yield type("Turn", (), {"start": 0.0, "end": 1.0})(), None, "SPEAKER_0"
+
+        class FakePipeline:
+            def __call__(self, path, **kwargs):
+                return FakeAnnotation()
+
+        def factory():
+            calls.append(True)
+            return FakePipeline()
+
+        manager = DiarizationManager(hf_token="token", device="cpu")
+        with mock.patch.object(
+            DiarizationManager, "_load_pipeline", side_effect=factory
+        ):
+            first = manager.diarize("fake.wav")
+            second = manager.diarize("fake.wav")
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(
+            [(segment.start, segment.end) for segment in first], [(0.0, 1.0)]
+        )
+        self.assertEqual(
+            [(segment.start, segment.end) for segment in second], [(0.0, 1.0)]
+        )
+
     def test_hybrid_inference_lock_covers_encode_call(self):
         hybrid = HybridDiarization(device="cpu")
         fake_model = FakeEmbeddingModel()

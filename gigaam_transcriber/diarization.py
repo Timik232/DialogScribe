@@ -329,10 +329,11 @@ class DiarizationManager:
             
             # Инференс общей модели сериализуется локом кэша:
             # совместный GPU-вызов небезопасен между потоками
+            pipeline = self.pipeline
             with _model_cache.inference_lock(self._cache_key()):
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
-                    diarization = self.pipeline(str(audio_path), **kwargs)
+                    diarization = pipeline(str(audio_path), **kwargs)
             
             # Преобразование результатов
             segments = []
