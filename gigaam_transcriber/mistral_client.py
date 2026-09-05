@@ -117,12 +117,8 @@ class MistralASRClient(ASRProviderBase):
         sf.write(buffer, audio, sr, format="WAV")
         return buffer.getvalue()
 
-    def _send_transcription_request(self, wav_bytes: bytes) -> str:
-        """Отправить запрос к Mistral API с retry/backoff."""
-        self._ensure_open()
-        url = f"{self.asr_url}/v1/audio/transcriptions"
-
-        # Проактивное ограничение частоты запросов к API
+    def _throttle(self) -> None:
+        """Proactive client-side rate limiting between API requests."""
         if self._min_request_interval > 0:
             with self._rate_limit_lock:
                 now = time.monotonic()
@@ -131,10 +127,14 @@ class MistralASRClient(ASRProviderBase):
                     time.sleep(self._min_request_interval - elapsed)
                 self._last_request_time = time.monotonic()
 
-        files = {
-            "file": ("audio.wav", wav_bytes, "application/octet-stream"),
-        }
-        data = {"model": self.model}
+    def _post_transcription(self, files: dict, data: dict, label: str) -> str:
+        """POST /v1/audio/transcriptions with one shared retry/backoff policy.
+
+        Retries timeouts and 429/503 responses with exponential backoff
+        (capped at 10s); any other HTTP or network failure raises ASRError
+        immediately. `label` only prefixes log lines.
+        """
+        url = f"{self.asr_url}/v1/audio/transcriptions"
         headers: dict[str, str] = {}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -146,14 +146,12 @@ class MistralASRClient(ASRProviderBase):
                 response.raise_for_status()
             except httpx.TimeoutException as exc:
                 if attempt == max_retries:
-                    logger.exception("Таймаут ASR после %d попыток", max_retries)
+                    logger.exception("%s timeout after %d attempts", label, max_retries)
                     raise ASRError("таймаут запроса к ASR", cause=exc) from exc
                 backoff = min(1.0 * (2.0**attempt), 10.0)
                 logger.warning(
-                    "ASR timeout (attempt %d/%d), retry in %.1fs",
-                    attempt + 1,
-                    max_retries,
-                    backoff,
+                    "%s timeout (attempt %d/%d), retry in %.1fs",
+                    label, attempt + 1, max_retries, backoff,
                 )
                 time.sleep(backoff)
                 continue
@@ -161,41 +159,42 @@ class MistralASRClient(ASRProviderBase):
                 if exc.response.status_code in (429, 503) and attempt < max_retries:
                     backoff = min(1.0 * (2.0**attempt), 10.0)
                     logger.warning(
-                        "ASR status %d (attempt %d/%d), retry in %.1fs",
-                        exc.response.status_code,
-                        attempt + 1,
-                        max_retries,
-                        backoff,
+                        "%s status %d (attempt %d/%d), retry in %.1fs",
+                        label, exc.response.status_code, attempt + 1, max_retries, backoff,
                     )
                     time.sleep(backoff)
                     continue
-                logger.exception("ASR вернул HTTP ошибку")
+                logger.exception("%s вернул HTTP ошибку", label)
                 raise ASRError(
-                    f"HTTP {exc.response.status_code}: {exc.response.text}",
+                    f"HTTP {exc.response.status_code}",
                     cause=exc,
                 ) from exc
             except httpx.RequestError as exc:
                 if attempt == max_retries:
-                    logger.exception("ASR request error after %d retries", max_retries)
+                    logger.exception("%s request error after %d retries", label, max_retries)
                     raise ASRError("ошибка HTTP-запроса к ASR", cause=exc) from exc
                 backoff = min(1.0 * (2.0**attempt), 10.0)
                 logger.warning(
-                    "ASR request error (attempt %d/%d), retry in %.1fs: %s",
-                    attempt + 1,
-                    max_retries,
-                    backoff,
-                    exc,
+                    "%s request error (attempt %d/%d), retry in %.1fs: %s",
+                    label, attempt + 1, max_retries, backoff, exc,
                 )
                 time.sleep(backoff)
                 continue
 
             payload = response.json()
-            text = payload.get("text", "")
-            if text is None:
-                text = ""
-            return text
+            return payload.get("text") or ""
 
         raise ASRError("не удалось получить ответ от ASR")
+
+    def _send_transcription_request(self, wav_bytes: bytes) -> str:
+        """Отправить WAV-запрос к Mistral API с retry/backoff."""
+        self._ensure_open()
+        self._throttle()
+        files = {
+            "file": ("audio.wav", wav_bytes, "application/octet-stream"),
+        }
+        data = {"model": self.model}
+        return self._post_transcription(files, data, "ASR")
 
     def transcribe(
         self,
@@ -257,80 +256,14 @@ class MistralASRClient(ASRProviderBase):
             return ""
 
         ext = content_type.split("/")[-1]
-
-        url = f"{self.asr_url}/v1/audio/transcriptions"
-
-        if self._min_request_interval > 0:
-            with self._rate_limit_lock:
-                now = time.monotonic()
-                elapsed = now - self._last_request_time
-                if elapsed < self._min_request_interval:
-                    time.sleep(self._min_request_interval - elapsed)
-                self._last_request_time = time.monotonic()
-
         files = {
             "file": (f"audio.{ext}", raw_bytes, content_type),
         }
         data = {"model": self.model}
-        headers: dict[str, str] = {}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
-
-        max_retries = self._max_retries
-        for attempt in range(max_retries + 1):
-            try:
-                response = self._client.post(url, headers=headers, files=files, data=data)
-                response.raise_for_status()
-            except httpx.TimeoutException as exc:
-                if attempt == max_retries:
-                    logger.exception("ASR raw timeout after %d attempts", max_retries)
-                    raise ASRError("таймаут запроса к ASR", cause=exc) from exc
-                backoff = min(1.0 * (2.0 ** attempt), 10.0)
-                logger.warning(
-                    "ASR raw timeout (attempt %d/%d), retry in %.1fs",
-                    attempt + 1,
-                    max_retries,
-                    backoff,
-                )
-                time.sleep(backoff)
-                continue
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code in (429, 503) and attempt < max_retries:
-                    backoff = min(1.0 * (2.0 ** attempt), 10.0)
-                    logger.warning(
-                        "ASR raw status %d (attempt %d/%d), retry in %.1fs",
-                        exc.response.status_code,
-                        attempt + 1,
-                        max_retries,
-                        backoff,
-                    )
-                    time.sleep(backoff)
-                    continue
-                raise ASRError(
-                    f"HTTP {exc.response.status_code}: {exc.response.text}",
-                    cause=exc,
-                ) from exc
-            except httpx.RequestError as exc:
-                if attempt == max_retries:
-                    logger.exception("ASR raw request error after %d retries", max_retries)
-                    raise ASRError("ошибка HTTP-запроса к ASR", cause=exc) from exc
-                backoff = min(1.0 * (2.0 ** attempt), 10.0)
-                logger.warning(
-                    "ASR raw request error (attempt %d/%d), retry in %.1fs: %s",
-                    attempt + 1,
-                    max_retries,
-                    backoff,
-                    exc,
-                )
-                time.sleep(backoff)
-                continue
-
-            payload = response.json()
-            text = payload.get("text", "") or ""
-            logger.info("ASR transcribe_raw complete: text_len=%d", len(text))
-            return text
-
-        raise ASRError("не удалось получить ответ от ASR")
+        self._throttle()
+        text = self._post_transcription(files, data, "ASR raw")
+        logger.info("ASR transcribe_raw complete: text_len=%d", len(text))
+        return text
 
     def _parse_segment(self, segment: Any) -> _SegmentSpec:
         """Нормализация входного описания сегмента."""
