@@ -162,14 +162,40 @@ def get_table_counts_sync(engine, tables):
         return {t.name: conn.scalar(select(func.count()).select_from(t)) for t in tables}
 
 
-def get_table_stats_sync(engine, tables):
+def get_table_stats_sync(engine, tables, skip=None):
+    skip = skip or {}
     with engine.connect() as conn:
         stats = {}
         for t in tables:
             pk = _pk_column(t)
-            count, lo, hi = conn.execute(select(func.count(), func.min(pk), func.max(pk)).select_from(t)).one()
+            q = select(func.count(), func.min(pk), func.max(pk)).select_from(t)
+            if skip.get(t.name):
+                q = q.where(pk.not_in(list(skip[t.name])))
+            count, lo, hi = conn.execute(q).one()
             stats[t.name] = (int(count), lo, hi)
         return stats
+
+
+def get_orphan_pks_sync(engine, tables):
+    # sqlite never enforced FKs, so production can hold child rows whose parent
+    # is gone; they must be skipped or postgres rejects the insert
+    by_name = {t.name: t for t in tables}
+    orphans = {}
+    with engine.connect() as conn:
+        for t in tables:
+            pk = _pk_column(t)
+            reasons = {}
+            for fk in t.foreign_keys:
+                parent_table = fk.column.table
+                if parent_table.name not in by_name:
+                    continue
+                parent_pk = _pk_column(by_name[parent_table.name])
+                q = select(pk, fk.parent).where(fk.parent.is_not(None), fk.parent.not_in(select(parent_pk)))
+                for pk_value, fk_value in conn.execute(q).all():
+                    reasons[pk_value] = f"{fk.parent.name}={fk_value!r} not in {parent_table.name}"
+            if reasons:
+                orphans[t.name] = reasons
+    return orphans
 
 
 def fetch_batch(engine, table, pk, last_value, limit):
@@ -229,24 +255,33 @@ async def truncate_dest(engine, tables):
                 await conn.execute(t.delete())
 
 
-async def copy_table(sync_engine, dest_engine, table):
+async def copy_table(sync_engine, dest_engine, table, skip_pks):
     pk = _pk_column(table)
     chunk = chunk_size_for(table.name)
     last = None
     copied = 0
     async with dest_engine.begin() as conn:
         while True:
-            rows = await asyncio.to_thread(fetch_batch, sync_engine, table, pk, last, chunk)
-            if not rows:
+            batch = await asyncio.to_thread(fetch_batch, sync_engine, table, pk, last, chunk)
+            if not batch:
                 break
-            await conn.execute(table.insert(), [coerce_row(table, row) for row in rows])
-            copied += len(rows)
-            last = rows[-1][pk.name]
+            # keyset cursor advances on the raw batch; skipped rows must not stall pagination
+            last = batch[-1][pk.name]
+            rows = [row for row in batch if row[pk.name] not in skip_pks]
+            if rows:
+                await conn.execute(table.insert(), [coerce_row(table, row) for row in rows])
+                copied += len(rows)
     return copied
 
 
-async def verify(sync_engine, dest_engine, tables):
-    src = await asyncio.to_thread(get_table_stats_sync, sync_engine, tables)
+def format_orphan_report(name, reasons, cap=10):
+    entries = [f"pk={pk} ({reason})" for pk, reason in reasons.items()]
+    shown = ", ".join(entries[:cap]) + (" ..." if len(entries) > cap else "")
+    return f"[{name}] skipping {len(entries)} orphan row(s): {shown}"
+
+
+async def verify(sync_engine, dest_engine, tables, skip=None):
+    src = await asyncio.to_thread(get_table_stats_sync, sync_engine, tables, skip)
     dst = await get_table_stats(dest_engine, tables)
     all_ok = True
     for t in tables:
@@ -263,6 +298,8 @@ async def main(argv=None):
 
     reflected, source_names = await asyncio.to_thread(reflect_source, sync_engine)
     tables = plan_copy_tables(Base.metadata, reflected, source_names)
+    orphan_reasons = await asyncio.to_thread(get_orphan_pks_sync, sync_engine, tables)
+    skip = {name: set(reasons) for name, reasons in orphan_reasons.items()}
 
     missing = await dest_missing_tables(dest_engine, tables)
     if missing:
@@ -280,6 +317,8 @@ async def main(argv=None):
     for t in tables:
         print(f"  {t.name:<22} src={src_counts[t.name]:>8}  dest={dest_counts[t.name]:>8}  chunk={chunk_size_for(t.name)}")
     print(f"alembic: src={src_version!r} dest={dest_version!r}")
+    for name, reasons in orphan_reasons.items():
+        print(format_orphan_report(name, reasons))
 
     non_empty = {t.name: dest_counts[t.name] for t in tables if dest_counts[t.name] > 0}
     if not args.yes:
@@ -300,7 +339,7 @@ async def main(argv=None):
     for t in tables:
         started = time.monotonic()
         before = dest_counts[t.name]
-        copied = await copy_table(sync_engine, dest_engine, t)
+        copied = await copy_table(sync_engine, dest_engine, t, skip.get(t.name, set()))
         after = await get_table_counts(dest_engine, [t])
         print(f"[{t.name}] src={src_counts[t.name]} dest_before={before} copied={copied} dest_after={after[t.name]} ({time.monotonic() - started:.1f}s)")
 
@@ -310,7 +349,7 @@ async def main(argv=None):
     else:
         print(f"NOTE: alembic_version not comparable: src={src_version!r} dest={dest_version!r}")
 
-    ok = await verify(sync_engine, dest_engine, tables)
+    ok = await verify(sync_engine, dest_engine, tables, skip)
     print("verification " + ("PASSED" if ok else "FAILED"))
     await dest_engine.dispose()
     sync_engine.dispose()

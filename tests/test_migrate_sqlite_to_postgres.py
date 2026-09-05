@@ -14,7 +14,10 @@ from tools.migrate_sqlite_to_postgres import (
     chunk_ranges,
     chunk_size_for,
     coerce_row,
+    format_orphan_report,
+    get_orphan_pks_sync,
     get_table_counts_sync,
+    get_table_stats_sync,
     main,
     plan_copy_tables,
     reflect_source,
@@ -420,3 +423,86 @@ class TestMain:
             assert counts["meeting_prep_plans"] == 0
         finally:
             await engine.dispose()
+
+
+class TestOrphanSkipping:
+    def test_no_orphans_in_clean_fixture(self, src_engine):
+        assert get_orphan_pks_sync(src_engine, plan_for(src_engine)) == {}
+
+    def test_detects_fk_orphan_with_reason(self, src_engine):
+        with src_engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO usage_events (id, user_id, event_type, value, metadata, created_at)"
+                    " VALUES ('e2', 'ghost-user', 'transcribe', 1.0, '{}', '2026-01-09T08:00:00')"
+                )
+            )
+        orphans = get_orphan_pks_sync(src_engine, plan_for(src_engine))
+        assert orphans == {"usage_events": {"e2": "user_id='ghost-user' not in users"}}
+
+    def test_detects_self_referential_orphan(self, src_engine):
+        with src_engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO users (id, email, username, password_hash, role, is_active, approved_by, created_at, updated_at)"
+                    " VALUES ('u9', 'x@example.io', 'xena', 'h', 'user', 1, 'nobody', '2026-01-09T00:00:00', '2026-01-09T00:00:00')"
+                )
+            )
+        orphans = get_orphan_pks_sync(src_engine, plan_for(src_engine))
+        assert orphans == {"users": {"u9": "approved_by='nobody' not in users"}}
+
+    def test_genericized_extras_are_not_scanned(self, src_engine):
+        with src_engine.begin() as conn:
+            conn.execute(
+                text("INSERT INTO meeting_prep_plans VALUES ('mp9', 'ghost-user', 'c', 'c', 'r', 'm', '2026-01-09T00:00:00')")
+            )
+        orphans = get_orphan_pks_sync(src_engine, plan_for(src_engine))
+        assert "meeting_prep_plans" not in orphans
+
+    def test_stats_exclude_skipped_pks(self, src_engine):
+        stats = get_table_stats_sync(src_engine, plan_for(src_engine), {"usage_events": {"e1"}})
+        assert stats["usage_events"] == (0, None, None)
+        assert stats["users"] == (2, "u1", "u2")
+
+    def test_report_caps_at_ten_entries(self):
+        reasons = {f"pk{i}": f"user_id='ghost{i}' not in users" for i in range(12)}
+        report = format_orphan_report("usage_events", reasons)
+        assert report.startswith("[usage_events] skipping 12 orphan row(s): ")
+        assert "pk=pk9" in report
+        assert "pk=pk10" not in report
+        assert report.endswith("...")
+
+    @pytest.mark.asyncio
+    async def test_copy_skips_orphan_and_still_verifies(self, src_engine, dest_engine, src_url, dest_url, capsys):
+        with src_engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO usage_events (id, user_id, event_type, value, metadata, created_at)"
+                    " VALUES ('e2', 'ghost-user', 'transcribe', 1.0, '{}', '2026-01-09T08:00:00')"
+                )
+            )
+        rc = await main(["--source", src_url, "--dest", dest_url, "--yes"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "[usage_events] skipping 1 orphan row(s): pk=e2 (user_id='ghost-user' not in users)" in out
+        assert "[verify] usage_events: PASS" in out
+        assert "verification PASSED" in out
+        with dest_engine.connect() as conn:
+            assert conn.scalar(text("SELECT COUNT(*) FROM usage_events")) == 1
+            assert conn.scalar(text("SELECT COUNT(*) FROM usage_events WHERE user_id='ghost-user'")) == 0
+            assert conn.scalar(text("SELECT COUNT(*) FROM users")) == 2
+
+    @pytest.mark.asyncio
+    async def test_dry_run_reports_orphans_without_writing(self, src_engine, dest_engine, src_url, dest_url, capsys):
+        with src_engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO usage_events (id, user_id, event_type, value, metadata, created_at)"
+                    " VALUES ('e2', 'ghost-user', 'transcribe', 1.0, '{}', '2026-01-09T08:00:00')"
+                )
+            )
+        rc = await main(["--source", src_url, "--dest", dest_url])
+        assert rc == 0
+        assert "skipping 1 orphan row(s): pk=e2" in capsys.readouterr().out
+        with dest_engine.connect() as conn:
+            assert conn.scalar(text("SELECT COUNT(*) FROM usage_events")) == 0
