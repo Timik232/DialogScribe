@@ -80,20 +80,27 @@ def max_upload_bytes() -> int:
     return max_upload_mb() * 1024 * 1024
 
 
-class BodySizeExceeded(Exception):
-    """Raised by the receive wrapper once the raw body crosses the cap."""
+def _body_limit_detail(scope: dict) -> Any:
+    from routers._helpers import _openai_error
+
+    message = f"Request body too large. Maximum allowed is {max_upload_mb()}MB"
+    if str(scope.get("path", "")).startswith("/v1/"):
+        return _openai_error(message, "invalid_request_error", 413)
+    return message
 
 
 class BodySizeLimitMiddleware:
     """Pure-ASGI raw request-body limiter with a streaming byte counter.
 
-    Wraps ``receive`` and counts every ``http.request`` body chunk; the
-    request is aborted with 413 as soon as the encoded size exceeds
-    ``max_upload_bytes() + overhead`` (the overhead budget covers
-    multipart framing and form fields). A present ``Content-Length``
-    larger than the cap short-circuits before any body is read — but it
-    is never trusted for allowance: chunked/lying requests are caught by
-    the counter.
+    Wraps ``receive`` and counts every ``http.request`` body chunk; as soon
+    as the encoded size exceeds ``max_upload_bytes() + overhead`` (the
+    overhead budget covers multipart framing and form fields) the wrapper
+    raises ``HTTPException(413)`` — FastAPI re-raises HTTPException from
+    its body-parsing catch-all, so the 413 (not a generic 400) reaches the
+    client and the endpoint never runs. A ``Content-Length`` larger than
+    the cap short-circuits before any body is read, but the header is
+    never trusted for allowance: chunked/lying requests are caught by the
+    counter.
     """
 
     # Multipart framing + form fields allowance on top of the file limit.
@@ -111,7 +118,8 @@ class BodySizeLimitMiddleware:
 
         declared = _content_length(scope)
         if declared is not None and declared > limit:
-            await self._reject(scope, receive, send)
+            response = JSONResponse({"detail": _body_limit_detail(scope)}, status_code=413)
+            await response(scope, receive, send)
             return
 
         received = 0
@@ -122,17 +130,10 @@ class BodySizeLimitMiddleware:
             if message.get("type") == "http.request":
                 received += len(message.get("body") or b"")
                 if received > limit:
-                    raise BodySizeExceeded
+                    raise HTTPException(status_code=413, detail=_body_limit_detail(scope))
             return message
 
-        try:
-            await self.app(scope, limited_receive, send)
-        except BodySizeExceeded:
-            await self._reject(scope, receive, send)
-
-    async def _reject(self, scope: dict, receive: Callable, send: Callable) -> None:
-        response = _body_limit_response(scope)
-        await response(scope, receive, send)
+        await self.app(scope, limited_receive, send)
 
 
 def _content_length(scope: dict) -> int | None:
@@ -143,19 +144,6 @@ def _content_length(scope: dict) -> int | None:
             except ValueError:
                 return None
     return None
-
-
-def _body_limit_response(scope: dict) -> JSONResponse:
-    from routers._helpers import _openai_error
-
-    message = f"Request body too large. Maximum allowed is {max_upload_mb()}MB"
-    if str(scope.get("path", "")).startswith("/v1/"):
-        content: dict[str, Any] = {
-            "detail": _openai_error(message, "invalid_request_error", 413)
-        }
-    else:
-        content = {"detail": message}
-    return JSONResponse(content, status_code=413)
 
 
 def plain_error_detail(message: str, status: int) -> str:
