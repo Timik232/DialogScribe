@@ -551,11 +551,11 @@
       "severity": "Medium",
       "affected_artifact": "Autoflow/live-hints routes and clients",
       "description": "WebSocket JWTs are exposed in query strings and omit active-user/Origin validation",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 8 / Release B",
-      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-8-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-8-verification.txt",
+      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && HOME=/tmp PYTHONUSERBASE=/home/ser13volk/.local JWT_SECRET=ci-test-only python -m pytest -q tests/test_ws_protocol.py tests/test_autoflow_ws.py tests/test_live_hints_ws.py -p no:cacheprovider",
+      "evidence_path": ".sisyphus/evidence/task-8-ws-success.json; .sisyphus/evidence/task-8-ws-failures.txt",
       "expiry": ""
     },
     {
