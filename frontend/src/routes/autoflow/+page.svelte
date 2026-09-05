@@ -11,6 +11,11 @@
 		emoji: string;
 	}
 
+	interface ModelInfo {
+		id: string;
+		name: string;
+	}
+
 	interface Segment {
 		start: number;
 		end: number;
@@ -36,11 +41,18 @@
 		stage_timings: Record<string, number>;
 	}
 
+	type StageKey = 'transcribe' | 'summary' | 'insights' | 'mindmap';
+	type StageStatus = 'pending' | 'active' | 'done' | 'skipped';
+
 	interface ProgressMessage {
 		type?: 'auth_ok' | 'ack' | 'status' | 'progress' | 'complete' | 'error';
-		stage: 'transcribing' | 'summarizing' | 'mindmap' | 'insights' | 'processing' | 'complete' | 'error';
+		stage: StageKey | 'upload' | 'skipped' | 'complete' | 'error';
 		progress?: number;
 		message?: string;
+		seq?: number;
+		session_id?: string;
+		skipped_stage?: StageKey;
+		code?: string;
 		result?: AutoflowResult;
 	}
 
@@ -49,25 +61,42 @@
 		'#FF6D01', '#46BDC6', '#7B61FF', '#F538A0'
 	];
 
-	const STAGES = [
-		{ key: 'transcribing', label: 'Транскрибация', icon: '🎤' },
-		{ key: 'summarizing', label: 'Саммари', icon: '📝' },
-		{ key: 'mindmap', label: 'Майндмэп', icon: '🗺️' },
-		{ key: 'insights', label: 'Инсайты', icon: '📋' }
-	] as const;
+	const STAGES: Array<{ key: StageKey; label: string; icon: string }> = [
+		{ key: 'transcribe', label: 'Транскрибация', icon: '🎤' },
+		{ key: 'summary', label: 'Саммари', icon: '📝' },
+		{ key: 'insights', label: 'Инсайты', icon: '📋' },
+		{ key: 'mindmap', label: 'Майндмэп', icon: '🗺️' }
+	];
+
+	const WS_CLOSE_MESSAGES: Record<number, string> = {
+		4400: 'Нарушение протокола WebSocket',
+		4401: 'Ошибка авторизации WebSocket',
+		4403: 'Аккаунт деактивирован',
+		4408: 'Таймаут авторизации WebSocket',
+		4413: 'Файл слишком большой для обработки'
+	};
+
+	function resetStages(): Record<StageKey, StageStatus> {
+		return { transcribe: 'pending', summary: 'pending', insights: 'pending', mindmap: 'pending' };
+	}
 
 	let selectedFile: File | null = $state(null);
 	let templateKey = $state('meeting');
 	let diarizationMode = $state('none');
 	let denoiseMode = $state('none');
 	let includeInsights = $state(false);
+	let includeSummary = $state(true);
+	let includeMindmap = $state(true);
+	let selectedModel = $state('');
 	let templates: Template[] = $state([]);
+	let models: ModelInfo[] = $state([]);
 
 	let loading = $state(false);
 	let error = $state('');
 	let disconnected = $state(false);
+	let cancelled = $state(false);
 
-	let currentStage: string = $state('');
+	let stageStatuses: Record<StageKey, StageStatus> = $state(resetStages());
 	let progressValue = $state(0);
 	let progressMessage = $state('');
 
@@ -77,8 +106,12 @@
 	let editingSpeaker: string | null = $state(null);
 	let editingSpeakerValue = $state('');
 
+	let activeSocket: WebSocket | null = null;
+	let uploadDone = false;
+
 	$effect(() => {
 		loadTemplates();
+		loadModels();
 	});
 
 	async function loadTemplates(): Promise<void> {
@@ -86,6 +119,15 @@
 			templates = await fetchApi<Template[]>('GET', '/api/templates');
 		} catch {
 			templates = [];
+		}
+	}
+
+	async function loadModels(): Promise<void> {
+		try {
+			const resp = await fetchApi<{ models: ModelInfo[] }>('GET', '/api/models');
+			models = resp.models || [];
+		} catch {
+			models = [];
 		}
 	}
 
@@ -129,16 +171,55 @@
 		return token;
 	}
 
+	function applyStageEvent(msg: ProgressMessage): void {
+		if (msg.type !== 'progress' && msg.type !== 'status') return;
+
+		if (msg.stage === 'skipped') {
+			if (msg.skipped_stage) stageStatuses[msg.skipped_stage] = 'skipped';
+			return;
+		}
+		const idx = STAGES.findIndex((s) => s.key === msg.stage);
+		if (idx === -1) return;
+		STAGES.forEach((s, i) => {
+			if (i < idx && stageStatuses[s.key] === 'active') stageStatuses[s.key] = 'done';
+		});
+		stageStatuses[msg.stage as StageKey] = 'active';
+	}
+
+	function markRemainingDone(): void {
+		STAGES.forEach((s) => {
+			if (stageStatuses[s.key] !== 'skipped') stageStatuses[s.key] = 'done';
+		});
+	}
+
+	function cancelRun(): void {
+		if (!activeSocket) return;
+		cancelled = true;
+		loading = false;
+		progressMessage = 'Обработка отменена';
+		try {
+			if (uploadDone && activeSocket.readyState === WebSocket.OPEN) {
+				activeSocket.send(JSON.stringify({ type: 'cancel' }));
+			} else {
+				activeSocket.close();
+			}
+		} catch {
+			try { activeSocket.close(); } catch { /* socket already closed */ }
+		}
+	}
+
 	async function startAutoflow(): Promise<void> {
 		if (!selectedFile) return;
 
 		loading = true;
 		error = '';
 		disconnected = false;
+		cancelled = false;
 		result = null;
-		currentStage = 'transcribing';
+		stageStatuses = resetStages();
 		progressValue = 0;
 		progressMessage = 'Подключение...';
+		uploadDone = false;
 
 		try {
 			const token = getAccessToken();
@@ -154,6 +235,7 @@
 			const wsUrl = `${wsProtocol}//${window.location.host}/api/autoflow/ws`;
 			const ws = new WebSocket(wsUrl);
 			ws.binaryType = 'arraybuffer';
+			activeSocket = ws;
 
 			ws.onopen = () => {
 				ws.send(JSON.stringify({ type: 'auth', token, protocol: 1 }));
@@ -167,14 +249,16 @@
 					template_key: templateKey,
 					diarization_mode: diarizationMode,
 					denoise: denoiseMode,
-					include_summary: true,
-					include_mindmap: true,
+					include_summary: includeSummary,
+					include_mindmap: includeMindmap,
 					include_insights: includeInsights,
+					model: selectedModel || undefined
 				}));
 				const chunkSize = 256 * 1024;
 				for (let offset = 0; offset < fileBuffer.byteLength; offset += chunkSize) {
-					ws.send(fileBuffer.slice(offset, offset + chunkSize));
+					ws.send(fileBuffer.slice(offset, Math.min(offset + chunkSize, fileBuffer.byteLength)));
 				}
+				uploadDone = true;
 				progressMessage = 'Файл отправлен, обработка...';
 			};
 
@@ -186,35 +270,42 @@
 					return;
 				}
 
-				if (msg.type === 'ack' || msg.type === 'status') {
+				if (msg.type === 'ack') {
 					return;
 				}
 
-				if (msg.stage === 'error') {
-					error = msg.message || 'Неизвестная ошибка';
+				if (msg.type === 'error' || msg.stage === 'error') {
+					error = msg.code === 'limit_exceeded'
+						? `⏳ ${msg.message || 'Превышен лимит использования'}`
+						: msg.message || 'Неизвестная ошибка';
 					loading = false;
 					ws.close();
 					return;
 				}
 
-				if (msg.stage === 'complete') {
+				if (msg.type === 'complete' || msg.stage === 'complete') {
 					result = msg.result || null;
 					loading = false;
 					progressValue = 1;
 					progressMessage = 'Готово!';
+					markRemainingDone();
 					ws.close();
 					return;
 				}
 
-				currentStage = msg.stage;
-				progressValue = msg.progress ?? 0;
-				progressMessage = msg.message || '';
+				applyStageEvent(msg);
+				progressValue = msg.progress ?? progressValue;
+				if (msg.message) progressMessage = msg.message;
 			};
 
 			ws.onclose = (event) => {
+				activeSocket = null;
+				if (cancelled) return;
 				if (loading && !result) {
-					if (event.code === 4401 || event.code === 4403 || event.code === 4408 || event.code === 4400) {
-						error = 'Ошибка авторизации WebSocket';
+					if (event.code in WS_CLOSE_MESSAGES) {
+						error = event.reason
+							? `${WS_CLOSE_MESSAGES[event.code]}: ${event.reason}`
+							: WS_CLOSE_MESSAGES[event.code];
 					} else if (event.code !== 1000) {
 						disconnected = true;
 					}
@@ -223,7 +314,7 @@
 			};
 
 			ws.onerror = () => {
-				if (loading) {
+				if (loading && !cancelled) {
 					disconnected = true;
 					loading = false;
 				}
@@ -333,21 +424,42 @@
 					<option value="advanced">Расширенная</option>
 				</select>
 			</div>
-			<div class="field">
-				<label for="denoise">Шумоподавление</label>
-				<select id="denoise" class="input" bind:value={denoiseMode}>
-					<option value="none">Нет</option>
-					<option value="light">Лёгкое</option>
-					<option value="medium">Среднее</option>
-				</select>
-			</div>
-			<div class="field checkbox-field">
-				<label class="checkbox-label">
-					<input type="checkbox" bind:checked={includeInsights} />
-					<span>📋 Извлечь инсайты</span>
-				</label>
-			</div>
+		<div class="field">
+			<label for="denoise">Шумоподавление</label>
+			<select id="denoise" class="input" bind:value={denoiseMode}>
+				<option value="none">Нет</option>
+				<option value="light">Лёгкое</option>
+				<option value="medium">Среднее</option>
+			</select>
 		</div>
+		<div class="field">
+			<label for="model">Модель LLM</label>
+			<select id="model" class="input" bind:value={selectedModel}>
+				<option value="">По умолчанию</option>
+				{#each models as m}
+					<option value={m.id}>{m.name}</option>
+				{/each}
+			</select>
+		</div>
+		<div class="field checkbox-field">
+			<label class="checkbox-label">
+				<input type="checkbox" bind:checked={includeSummary} disabled={loading} />
+				<span>📝 Саммари</span>
+			</label>
+		</div>
+		<div class="field checkbox-field">
+			<label class="checkbox-label">
+				<input type="checkbox" bind:checked={includeMindmap} disabled={loading} />
+				<span>🗺️ Майндмэп</span>
+			</label>
+		</div>
+		<div class="field checkbox-field">
+			<label class="checkbox-label">
+				<input type="checkbox" bind:checked={includeInsights} disabled={loading} />
+				<span>📋 Инсайты</span>
+			</label>
+		</div>
+	</div>
 
 		<button
 			class="btn btn-primary autoflow-btn"
@@ -376,16 +488,30 @@
 		</div>
 	{/if}
 
-	{#if loading}
+	{#if loading || cancelled}
 		<section class="card progress-section">
 			<div class="stages-row">
 				{#each STAGES as stage, i}
-					<div class="stage-item" class:active={currentStage === stage.key} class:done={progressValue > (i + 1) / 3}>
+					<div
+						class="stage-item"
+						class:active={stageStatuses[stage.key] === 'active'}
+						class:done={stageStatuses[stage.key] === 'done'}
+						class:skipped={stageStatuses[stage.key] === 'skipped'}
+					>
 						<span class="stage-icon">{stage.icon}</span>
 						<span class="stage-label">{stage.label}</span>
+						<span class="stage-state">
+							{stageStatuses[stage.key] === 'skipped'
+								? 'отключено'
+								: stageStatuses[stage.key] === 'done'
+									? 'готово'
+									: stageStatuses[stage.key] === 'active'
+										? 'выполняется'
+										: 'ожидание'}
+						</span>
 					</div>
 					{#if i < STAGES.length - 1}
-						<div class="stage-connector" class:filled={progressValue > (i + 1) / 3}></div>
+						<div class="stage-connector" class:filled={stageStatuses[STAGES[i + 1].key] !== 'pending'}></div>
 					{/if}
 				{/each}
 			</div>
@@ -396,6 +522,14 @@
 
 			{#if progressMessage}
 				<p class="progress-message">{progressMessage}</p>
+			{/if}
+
+			{#if loading}
+				<div class="cancel-row">
+					<button class="btn btn-secondary cancel-btn" onclick={cancelRun}>
+						Отменить обработку
+					</button>
+				</div>
 			{/if}
 		</section>
 	{/if}
@@ -718,6 +852,39 @@
 
 	.stage-item.done {
 		opacity: 0.75;
+	}
+
+	.stage-item.done .stage-label::after {
+		content: ' ✓';
+		color: var(--color-cta);
+	}
+
+	.stage-item.skipped {
+		opacity: 0.35;
+	}
+
+	.stage-item.skipped .stage-label {
+		text-decoration: line-through;
+	}
+
+	.stage-state {
+		font-size: 0.6875rem;
+		color: var(--color-muted);
+	}
+
+	.stage-item.active .stage-state {
+		color: var(--color-cta);
+	}
+
+	.cancel-row {
+		display: flex;
+		justify-content: center;
+		margin-top: 0.75rem;
+	}
+
+	.cancel-btn {
+		height: 36px;
+		font-size: 0.8125rem;
 	}
 
 	.stage-icon {
