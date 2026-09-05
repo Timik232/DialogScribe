@@ -32,7 +32,11 @@ from .data_models import (
     TranscriptionResult,
     TranscriptionSegment,
 )
-from .diarization import DiarizationManager, HybridDiarization
+from .diarization import (
+    DiarizationManager,
+    HybridDiarization,
+    release_diarization_models,
+)
 from .exceptions import (
     EmptyAudioError,
     EmptyFileError,
@@ -349,7 +353,8 @@ class GigaAMTranscriber:
         ASR-провайдеры живут ровно одну операцию и закрываются их
         ``_ProviderSession``; временные чанки удаляются в finally каждого
         пути транскрипции. Здесь освобождаются лениво загруженные модели:
-        менеджер диаризации (pyannote/GPU) и аудио-процессор.
+        менеджер диаризации (pyannote/GPU), процесс-широкий кэш моделей
+        диаризации и аудио-процессор.
         """
         if getattr(self, "_cleaned", False):
             return
@@ -359,6 +364,8 @@ class GigaAMTranscriber:
             self._diarization_manager = None
             released.append("diarization_manager")
             self._release_cuda_memory()
+        if release_diarization_models():
+            released.append("diarization_model_cache")
         if self._audio_processor is not None:
             self._audio_processor = None
             released.append("audio_processor")
