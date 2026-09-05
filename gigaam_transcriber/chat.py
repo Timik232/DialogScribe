@@ -7,6 +7,9 @@ LLM-модуль для ответов на вопросы по транскри
 
 import hashlib
 import logging
+import os
+import threading
+import time
 from typing import Optional
 
 from gigaam_transcriber.summarizer import LLMClient
@@ -46,14 +49,80 @@ CHUNK_SUMMARY_PROMPT = """\
 Ответ на русском, 3-5 предложений."""
 
 # ---------------------------------------------------------------------------
-# Chunk summary cache
+# Chunk summary cache (bounded: max entries + TTL, thread-safe)
 # ---------------------------------------------------------------------------
 
-_chunk_summary_cache: dict[str, list[dict]] = {}
+DEFAULT_CHAT_CACHE_MAX_ENTRIES = 64
+DEFAULT_CHAT_CACHE_TTL_SECONDS = 3600.0
+
+# key -> (expires_at monotonic deadline, summaries)
+_chunk_summary_cache: dict[str, tuple[float, list[dict]]] = {}
+_cache_lock = threading.Lock()
 
 
 def _get_cache_key(text: str) -> str:
     return hashlib.md5(text.encode()).hexdigest()
+
+
+def _chat_cache_max_entries() -> int:
+    raw = os.getenv("CHAT_CACHE_MAX_ENTRIES", "")
+    if raw.strip():
+        try:
+            value = int(raw)
+        except ValueError:
+            logger.warning("Invalid CHAT_CACHE_MAX_ENTRIES=%r, using %d", raw, DEFAULT_CHAT_CACHE_MAX_ENTRIES)
+            return DEFAULT_CHAT_CACHE_MAX_ENTRIES
+        if value > 0:
+            return value
+        logger.warning("Non-positive CHAT_CACHE_MAX_ENTRIES=%r, using %d", raw, DEFAULT_CHAT_CACHE_MAX_ENTRIES)
+    return DEFAULT_CHAT_CACHE_MAX_ENTRIES
+
+
+def _chat_cache_ttl_seconds() -> float:
+    raw = os.getenv("CHAT_CACHE_TTL_SECONDS", "")
+    if raw.strip():
+        try:
+            value = float(raw)
+        except ValueError:
+            logger.warning("Invalid CHAT_CACHE_TTL_SECONDS=%r, using %.0f", raw, DEFAULT_CHAT_CACHE_TTL_SECONDS)
+            return DEFAULT_CHAT_CACHE_TTL_SECONDS
+        if value > 0:
+            return value
+        logger.warning("Non-positive CHAT_CACHE_TTL_SECONDS=%r, using %.0f", raw, DEFAULT_CHAT_CACHE_TTL_SECONDS)
+    return DEFAULT_CHAT_CACHE_TTL_SECONDS
+
+
+def _cache_get(key: str) -> Optional[list[dict]]:
+    now = time.monotonic()
+    with _cache_lock:
+        entry = _chunk_summary_cache.get(key)
+        if entry is None:
+            return None
+        expires_at, summaries = entry
+        if now >= expires_at:
+            del _chunk_summary_cache[key]
+            return None
+        return summaries
+
+
+def _cache_put(key: str, summaries: list[dict]) -> None:
+    now = time.monotonic()
+    ttl = _chat_cache_ttl_seconds()
+    max_entries = _chat_cache_max_entries()
+    with _cache_lock:
+        for stale in [k for k, (exp, _) in _chunk_summary_cache.items() if now >= exp]:
+            del _chunk_summary_cache[stale]
+        # Re-insert so FIFO eviction order reflects recency of use.
+        _chunk_summary_cache.pop(key, None)
+        while len(_chunk_summary_cache) >= max_entries:
+            _chunk_summary_cache.pop(next(iter(_chunk_summary_cache)))
+        _chunk_summary_cache[key] = (now + ttl, summaries)
+
+
+def reset_chunk_summary_cache() -> None:
+    """Clear the shared cache (test/ops hook)."""
+    with _cache_lock:
+        _chunk_summary_cache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -191,11 +260,12 @@ def _get_compressed_transcript(
 ) -> str:
     """Get or create compressed transcript context."""
     cache_key = _get_cache_key(text)
-    if cache_key not in _chunk_summary_cache:
+    summaries = _cache_get(cache_key)
+    if summaries is None:
         logger.info("Creating chunk summaries for long transcript (cache miss)")
-        _chunk_summary_cache[cache_key] = _create_chunk_summaries(text, llm_client, model=model)
+        summaries = _create_chunk_summaries(text, llm_client, model=model)
+        _cache_put(cache_key, summaries)
 
-    summaries = _chunk_summary_cache[cache_key]
     query = latest_message.get("content", "") if latest_message else ""
     max_ctx = min(budget["total"] // 2, 60000)
 
