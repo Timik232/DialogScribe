@@ -27,7 +27,7 @@ services:
       # Server
       - HOST=0.0.0.0
       - PORT=7860
-      - MAX_UPLOAD_SIZE_MB=500
+      - MAX_UPLOAD_SIZE_MB=${MAX_UPLOAD_SIZE_MB:-1024}
       # Bootstrap admin (dev-only credentials from operator env, no defaults)
       - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@local.dev}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env.dev (dev-only value)}

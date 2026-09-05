@@ -81,8 +81,8 @@ LLM_API_KEY=your_openai_api_key_here
 # API-ключ для авторизации (опционально)
 API_KEY=your-api-key-here
 
-# Лимит загрузки (МБ, по умолчанию 100)
-MAX_UPLOAD_SIZE_MB=100
+# Лимит загрузки (МБ, по умолчанию 1024 — единое значение с docker-compose, фронтендом и кодом)
+MAX_UPLOAD_SIZE_MB=1024
 ```
 
 ### Сборка и запуск
@@ -141,7 +141,7 @@ python -m pytest -m "not slow and not requires_gpu and not requires_hf_token and
 | `LLM_MODELS` | Список доступных моделей (через запятую) | `gpt-4.1,gpt-4o-mini` |
 | `LLM_API_KEY` | Ключ API для LLM | — |
 | `API_KEY` | Bearer-токен для API-авторизации | — |
-| `MAX_UPLOAD_SIZE_MB` | Макс. размер загрузки (МБ) | `100` |
+| `MAX_UPLOAD_SIZE_MB` | Макс. размер загрузки (МБ) | `1024` |
 | `DATABASE_URL` | URL базы данных (SQLite) | — |
 | `ADMIN_EMAIL` | Email администратора (начальная загрузка) | — |
 | `ADMIN_PASSWORD` | Пароль администратора | — |
