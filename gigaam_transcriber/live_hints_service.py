@@ -139,14 +139,18 @@ class AudioAdapter:
         self._asr_client = get_asr_provider(preference=provider_preference)
 
     async def process_chunk(self, audio_b64: str, source: str) -> str:
-        """Decode base64 WebM audio, convert to WAV via ffmpeg, send to ASR.
+        """Decode base64 WebM audio and delegate to :meth:`process_chunk_bytes`."""
+        return await self.process_chunk_bytes(base64.b64decode(audio_b64), source)
+
+    async def process_chunk_bytes(self, raw_bytes: bytes, source: str) -> str:
+        """Convert raw WebM audio to WAV via ffmpeg and send to ASR.
 
         MediaRecorder with timeslice produces partial WebM fragments that lack
         proper container headers, causing Mistral to reject them.  Converting to
         WAV via ffmpeg produces a valid, self-contained audio file.
 
         Args:
-            audio_b64: Base64-encoded WebM audio data.
+            raw_bytes: Raw WebM audio bytes.
             source: Identifier for the audio source (e.g. participant name).
 
         Returns:
@@ -156,7 +160,6 @@ class AudioAdapter:
             ASRError: If transcription via ASR service fails.
         """
         import subprocess
-        raw_bytes = base64.b64decode(audio_b64)
         tmp_webm: str | None = None
         tmp_wav: str | None = None
         try:
