@@ -36,12 +36,18 @@ pipeline {
                 '''
                 sh '''
                     set -eu
-                    if [ -f "$GIT_URL" ]; then
-                        tar -xzf "$GIT_URL"
-                    else
-                        git clone --no-tags "$GIT_URL" .
-                        git checkout --detach "$GIT_REF"
-                    fi
+                    case "$GIT_URL" in
+                        *.tar.gz|*.tgz)
+                            tar -xzf "$GIT_URL"
+                            ;;
+                        *.tar)
+                            tar -xf "$GIT_URL"
+                            ;;
+                        *)
+                            git clone --no-tags "$GIT_URL" .
+                            git checkout --detach "$GIT_REF"
+                            ;;
+                    esac
                     mkdir -p .ci-artifacts
                     chmod 0777 .ci-artifacts
                     echo "$GIT_REF" > .ci-artifacts/verified-commit.txt
