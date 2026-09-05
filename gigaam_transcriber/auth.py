@@ -11,10 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from gigaam_transcriber.database import get_db
 from gigaam_transcriber.models import User
+from gigaam_transcriber.settings import JWT_SECRET
 
-JWT_SECRET = os.getenv("JWT_SECRET") or os.getenv("API_KEY") or ""
-if not JWT_SECRET:
-    raise RuntimeError("JWT_SECRET or API_KEY environment variable must be set")
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 15
 REFRESH_TOKEN_EXPIRE_DAYS = 7

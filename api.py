@@ -16,12 +16,12 @@ from gigaam_transcriber import GigaAMTranscriber
 from gigaam_transcriber.audio_processor import AudioProcessor
 from gigaam_transcriber.data_models import TranscriptionResult
 from gigaam_transcriber.auth import bootstrap_admin, get_current_user
+from gigaam_transcriber.settings import is_development
 from gigaam_transcriber.utils import setup_logging
 from gigaam_transcriber.database import async_session_factory
 from gigaam_transcriber.models import User
 
 from routers._helpers import (
-    API_KEY,
     SUPPORTED_EXTENSIONS,
     _handle_transcription_exception,
     _map_format,
@@ -36,12 +36,7 @@ PORT = int(os.getenv("PORT", "7860"))
 
 
 def is_development_mode() -> bool:
-    """Return True only when ENVIRONMENT is explicitly set to ``development``.
-
-    Fail-safe: anything else (unset, ``production``, typos) is treated as
-    production, which keeps API docs and schema endpoints disabled.
-    """
-    return os.getenv("ENVIRONMENT", "production").strip().lower() == "development"
+    return is_development()
 
 
 _DOCS_ENABLED = is_development_mode()

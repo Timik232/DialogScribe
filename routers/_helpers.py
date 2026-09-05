@@ -1,6 +1,6 @@
 import json
 import logging
-import os
+import secrets
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Response
@@ -19,8 +19,7 @@ from gigaam_transcriber.exceptions import (
     TranscriberError,
     UnsupportedFormatError,
 )
-
-API_KEY = os.getenv("API_KEY", "")
+from gigaam_transcriber.settings import API_KEY, V1_API_ENABLED
 
 logger = logging.getLogger("dialogscribe-api")
 security = HTTPBearer(auto_error=False)
@@ -34,9 +33,20 @@ def _openai_error(message: str, err_type: str, code: int) -> dict[str, dict[str,
 def _verify_auth(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)],
 ) -> None:
+    if not V1_API_ENABLED:
+        raise HTTPException(
+            status_code=503,
+            detail=_openai_error(
+                "The /v1 API is disabled on this server", "server_error", 503
+            ),
+        )
     if not API_KEY:
-        return
-    if not credentials or credentials.credentials != API_KEY:
+        logger.warning("/v1 request rejected: V1_API_ENABLED=true but API_KEY is not configured")
+        raise HTTPException(
+            status_code=503,
+            detail=_openai_error("The /v1 API is not available", "server_error", 503),
+        )
+    if not credentials or not secrets.compare_digest(credentials.credentials, API_KEY):
         raise HTTPException(
             status_code=401,
             detail=_openai_error("Invalid API key", "authentication_error", 401),
