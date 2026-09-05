@@ -4,12 +4,15 @@ Provides hint templates and placeholder functions for generating
 argumentative and navigational hints during live transcription.
 """
 
+import asyncio
 import base64
 import json
 import logging
 import os
 import re
+import subprocess
 import tempfile
+from dataclasses import dataclass
 from typing import Optional
 
 from .context_utils import estimate_tokens, estimate_tokens_accurate
@@ -24,6 +27,53 @@ logger = logging.getLogger(__name__)
 CONTEXT_WINDOW_TOKENS = 3000  # ~3 minutes of speech
 HINT_CATEGORIES = ["argumentative", "navigational"]
 HINT_GENERATION_INTERVAL = 30  # seconds between hint generations
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name, "")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+@dataclass(frozen=True)
+class LiveHintsBounds:
+    """Env-tunable bounds for one live-hints session (queues, caps, policy).
+
+    Read once per session; every queue and accumulator the session owns is
+    bounded by one of these values so memory cannot grow with session time.
+    """
+
+    recv_queue: int = 256
+    process_queue: int = 64
+    max_segments: int = 200
+    asr_attempts: int = 2
+    llm_attempts: int = 2
+    max_chunk_seconds: float = 30.0
+    status_interval: float = 5.0
+
+    @classmethod
+    def from_env(cls) -> "LiveHintsBounds":
+        return cls(
+            recv_queue=_env_int("LIVE_HINTS_RECV_QUEUE", 256),
+            process_queue=_env_int("LIVE_HINTS_PROCESS_QUEUE", 64),
+            max_segments=_env_int("LIVE_HINTS_MAX_SEGMENTS", 200),
+            asr_attempts=_env_int("LIVE_HINTS_ASR_ATTEMPTS", 2),
+            llm_attempts=_env_int("LIVE_HINTS_LLM_ATTEMPTS", 2),
+            max_chunk_seconds=_env_float("LIVE_HINTS_MAX_CHUNK_SECONDS", 30.0),
+            status_interval=_env_float("LIVE_HINTS_STATUS_INTERVAL", 5.0),
+        )
 
 # --- Hint Templates ---
 
@@ -149,6 +199,9 @@ class AudioAdapter:
         proper container headers, causing Mistral to reject them.  Converting to
         WAV via ffmpeg produces a valid, self-contained audio file.
 
+        The ffmpeg subprocess and file IO run in a worker thread
+        (:func:`asyncio.to_thread`) so the event loop is never blocked.
+
         Args:
             raw_bytes: Raw WebM audio bytes.
             source: Identifier for the audio source (e.g. participant name).
@@ -159,30 +212,10 @@ class AudioAdapter:
         Raises:
             ASRError: If transcription via ASR service fails.
         """
-        import subprocess
-        tmp_webm: str | None = None
-        tmp_wav: str | None = None
         try:
-            # Write raw WebM chunk
-            fd, tmp_webm = tempfile.mkstemp(suffix=".webm")
-            os.close(fd)
-            with open(tmp_webm, "wb") as f:
-                f.write(raw_bytes)
-
-            # Convert to WAV via ffmpeg (container has proper headers)
-            fd2, tmp_wav = tempfile.mkstemp(suffix=".wav")
-            os.close(fd2)
-            result = subprocess.run(
-                ["ffmpeg", "-y", "-i", tmp_webm, "-ar", "16000", "-ac", "1", tmp_wav],
-                capture_output=True, timeout=10,
-            )
-            if result.returncode != 0:
-                # ffmpeg couldn't decode — likely silence / empty chunk, skip
-                logger.debug("ffmpeg skipped chunk (rc=%d): %s", result.returncode, result.stderr.decode(errors="replace")[:200])
+            wav_bytes = await asyncio.to_thread(self._decode_to_wav, raw_bytes)
+            if wav_bytes is None:
                 return ""
-
-            with open(tmp_wav, "rb") as f:
-                wav_bytes = f.read()
             transcription = await self._asr_client.transcribe_raw(
                 wav_bytes, "audio.wav"
             )
@@ -193,6 +226,34 @@ class AudioAdapter:
             raise ASRError(
                 f"Transcription failed for source '{source}'", cause=exc
             ) from exc
+
+    def _decode_to_wav(self, raw_bytes: bytes) -> bytes | None:
+        """Sync worker-thread body: ffmpeg WebM → WAV bytes.
+
+        Returns None when ffmpeg cannot decode the chunk (silence / garbage);
+        tempfiles are always removed.
+        """
+        tmp_webm: str | None = None
+        tmp_wav: str | None = None
+        try:
+            fd, tmp_webm = tempfile.mkstemp(suffix=".webm")
+            os.close(fd)
+            with open(tmp_webm, "wb") as f:
+                f.write(raw_bytes)
+
+            fd2, tmp_wav = tempfile.mkstemp(suffix=".wav")
+            os.close(fd2)
+            result = subprocess.run(
+                ["ffmpeg", "-y", "-i", tmp_webm, "-ar", "16000", "-ac", "1", tmp_wav],
+                capture_output=True, timeout=10,
+            )
+            if result.returncode != 0:
+                # ffmpeg couldn't decode — likely silence / empty chunk, skip
+                logger.debug("ffmpeg skipped chunk (rc=%d): %s", result.returncode, result.stderr.decode(errors="replace")[:200])
+                return None
+
+            with open(tmp_wav, "rb") as f:
+                return f.read()
         finally:
             for p in (tmp_webm, tmp_wav):
                 if p:
