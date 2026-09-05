@@ -92,7 +92,7 @@ def _chat_cache_ttl_seconds() -> float:
     return DEFAULT_CHAT_CACHE_TTL_SECONDS
 
 
-def _cache_get(key: str) -> Optional[list[dict]]:
+def _cache_get(key: str) -> list[dict] | None:
     now = time.monotonic()
     with _cache_lock:
         entry = _chunk_summary_cache.get(key)

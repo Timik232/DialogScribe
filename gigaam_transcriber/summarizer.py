@@ -496,7 +496,7 @@ def _generate_summary_compute(
     transcription_text: str,
     system_prompt: str,
     llm_client: LLMClient,
-    model: Optional[str] = None,
+    model: str | None = None,
 ) -> str:
     """Synchronous summary compute: blocking LLM calls + retry sleeps.
 
