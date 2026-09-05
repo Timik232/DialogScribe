@@ -40,6 +40,7 @@ class FakeWebSocket:
         self._incoming = list(incoming)
         self._stop_until = stop_until
         self.query_params: dict[str, str] = {}
+        self.headers: dict[str, str] = {}
         self.sent: list[str] = []
         self.accepted = False
         self.close_code: int | None = None

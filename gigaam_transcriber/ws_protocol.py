@@ -9,7 +9,12 @@ Handshake
 ---------
 1. The client connects WITHOUT credentials in the URL. Supplying ``?token=``
    is rejected with close code 4400 to prevent downgrade to query-string auth.
-2. The server accepts the transport.
+2. The Origin header (browser handshakes only) is validated: absent Origin
+   (non-browser clients) is allowed — first-frame auth still applies;
+   same-origin (Origin scheme+host matches the request's own Host header,
+   http/https matching ws/wss) is allowed; anything else must be listed in
+   ``WS_ALLOWED_ORIGINS`` or is rejected with 4400.
+3. The server accepts the transport.
 3. Within ``WS_AUTH_TIMEOUT_SECONDS`` (default 10 s) the client must send ONE
    TEXT frame of at most 64 KiB::
 
@@ -27,7 +32,8 @@ Close codes
 =====  ===============================================================
 Code   Meaning
 ====== ===============================================================
-4400   Bad protocol shape/version (incl. query-string token downgrade)
+4400   Bad protocol shape/version (incl. query-string token downgrade,
+       disallowed Origin)
 4401   Auth failure (missing/malformed frame, bad/expired token, unknown user)
 4403   Authenticated user exists but is inactive
 4408   Auth frame not received within the timeout
@@ -73,6 +79,7 @@ Variable                   Default
 WS_AUTH_TIMEOUT_SECONDS    10
 WS_MAX_FRAME_BYTES         1048576
 WS_MAX_TOTAL_BYTES         MAX_UPLOAD_SIZE_MB * 1 MiB (default 1024)
+WS_ALLOWED_ORIGINS         (empty; comma-separated extra allowed Origins)
 =========================  ======================================
 
 Example
@@ -106,6 +113,7 @@ import tempfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import WebSocket, WebSocketDisconnect
 from sqlalchemy import select
@@ -194,6 +202,55 @@ async def ws_db_session() -> AsyncIterator[AsyncSession]:
         yield session
 
 
+_DEFAULT_ORIGIN_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
+
+
+def _origin_allowed(ws: WebSocket) -> bool:
+    """Origin policy for browser WebSocket handshakes (SEC-M5).
+
+    Allow when the Origin header is absent (non-browser clients — they still
+    face first-frame auth), when it is same-origin (scheme+host matches the
+    request's own Host header, ``http``/``https`` mapping to ``ws``/``wss``),
+    or when it is listed in the comma-separated ``WS_ALLOWED_ORIGINS`` env
+    allowlist (read at call time so deployments/tests can adjust it).
+    """
+    origin = (ws.headers.get("origin") or "").strip()
+    if not origin:
+        return True
+
+    allowed = {
+        entry.strip().rstrip("/").lower()
+        for entry in os.environ.get("WS_ALLOWED_ORIGINS", "").split(",")
+        if entry.strip()
+    }
+    if origin.rstrip("/").lower() in allowed:
+        return True
+
+    parsed = urlparse(origin)
+    if parsed.scheme not in _DEFAULT_ORIGIN_PORTS or not parsed.hostname:
+        return False
+    try:
+        origin_port = parsed.port or _DEFAULT_ORIGIN_PORTS[parsed.scheme]
+    except ValueError:
+        return False
+
+    host_header = (ws.headers.get("host") or "").strip()
+    if not host_header:
+        return False
+    host_parsed = urlparse("//" + host_header)
+    if not host_parsed.hostname:
+        return False
+    try:
+        request_port = host_parsed.port or _DEFAULT_ORIGIN_PORTS.get(ws.url.scheme, 80)
+    except ValueError:
+        return False
+
+    return (
+        parsed.hostname.lower() == host_parsed.hostname.lower()
+        and origin_port == request_port
+    )
+
+
 async def authenticate_websocket(
     ws: WebSocket, db: AsyncSession, *, limits: WsLimits | None = None
 ) -> WsIdentity | None:
@@ -205,6 +262,11 @@ async def authenticate_websocket(
     simply ``return``.
     """
     limits = limits or WsLimits.from_env()
+
+    if not _origin_allowed(ws):
+        await ws.accept()
+        await close_ws(ws, CLOSE_BAD_PROTOCOL, "origin not allowed")
+        return None
 
     if "token" in ws.query_params:
         await ws.accept()
