@@ -122,8 +122,8 @@ HOME=/tmp PYTHONUSERBASE=$HOME/.local JWT_SECRET=ci-test-only python -m pytest -
 | `POST /api/mindmap` | Генерация майндмапа (LLM) |
 | `POST /api/insights` | Извлечение инсайтов (LLM) |
 | `POST /api/chat` | Чат с контекстом транскрипции |
-| `WS /api/live-hints/ws` | Live-подсказки в реальном времени (WebSocket, JWT auth via query param; ошибки протокола — close-коды 44xx) |
-| `WS /api/autoflow/ws` | Автопоток транскрипции+аналитики (WebSocket, JWT via query param; лимиты — terminal-событие `limit_exceeded`) |
+| `WS /api/live-hints/ws` | Live-подсказки в реальном времени (WebSocket; JWT в первом текстовом кадре; ошибки протокола — close-коды 44xx) |
+| `WS /api/autoflow/ws` | Автопоток транскрипции+аналитики (WebSocket; JWT в первом текстовом кадре; лимиты — terminal-событие `limit_exceeded`) |
 | `GET/PUT /api/settings/asr-provider` | Настройка ASR-провайдера пользователя (mistral/litellm, по умолчанию litellm) |
 | `GET /api/models` | Список доступных LLM-моделей |
 | `/api/saved-transcriptions` | CRUD сохранённых транскрипций + share-ссылки (`/api/share/{share_id}` — публичный доступ без auth) |
@@ -133,6 +133,8 @@ HOME=/tmp PYTHONUSERBASE=$HOME/.local JWT_SECRET=ci-test-only python -m pytest -
 | Export routes | Экспорт в TXT, JSON, SRT, VTT, DOCX, PDF |
 
 Ошибки API возвращают стабильный код + `correlation_id` (заголовок `X-Correlation-ID` на каждом ответе) — детали остаются в серверных логах.
+
+Для обоих WebSocket endpoint первый текстовый кадр в течение 10 секунд должен содержать JSON `{"token": "..."}`. JWT в query-параметре не поддерживается и отклоняется (close `4400`). Таймаут первого кадра закрывает соединение с кодом `4408`, недействительный JWT — `4401`. Заголовок `Origin` также проверяется: разрешены same-origin и origins из `WS_ALLOWED_ORIGINS`; остальные запросы закрываются с кодом `4400`.
 
 ## Переменные окружения
 
