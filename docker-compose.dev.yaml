@@ -4,6 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile.dev
     container_name: dialogscribe-dev
+    user: "10001:10003"
     ports:
       - "7860:7860"
     environment:
@@ -35,6 +36,7 @@ services:
       - FRONTEND_URL=http://localhost:5173
     volumes:
       - dialogscribe_data:/app/data
+      - hf-cache:/home/appuser/.cache/huggingface
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7860/health')"]
@@ -45,3 +47,4 @@ services:
 
 volumes:
   dialogscribe_data:
+  hf-cache:

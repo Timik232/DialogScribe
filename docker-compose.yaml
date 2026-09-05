@@ -1,8 +1,8 @@
 services:
   vault-agent:
-    image: hashicorp/vault:2.0.4
+    image: hashicorp/vault@sha256:5be49781ecf78bfe775c5309c6a4d9f4e9e040b6c885c99eb2b12fb69855e1a2
     container_name: dialogscribe-vault-agent
-    user: "0:0"
+    user: "10002:10003"
     environment:
       - SKIP_SETCAP=1
       - HOME=/tmp
@@ -16,23 +16,31 @@ services:
     restart: unless-stopped
     networks:
       - secrets-net
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /etc/vault/secrets/secrets.json"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
 
   dialogscribe-web:
     image: 192.168.1.47:7002/dialogscribe:latest
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        - HF_TOKEN=${HF_TOKEN:-}
     restart: unless-stopped
-    network_mode: host
+    user: "10001:10003"
+    ports:
+      - "192.168.1.48:7860:7860"
     runtime: nvidia
     depends_on:
-      - vault-agent
+      vault-agent:
+        condition: service_healthy
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
     command: ["python", "api.py"]
     environment:
       - ENVIRONMENT=production
+      - VAULT_SECRETS_FILE=/etc/vault/secrets/secrets.json
       - ASR_URL=https://api.mistral.ai
       - ASR_MODEL=voxtral-mini-latest
       - PYANNOTE_MODEL=pyannote/speaker-diarization-3.1
@@ -68,9 +76,12 @@ services:
       start_period: 120s
     volumes:
       - ./data:/app/data
-      - ./samples:/app/samples
+      - ./samples:/app/samples:ro
       - ./vault/secrets:/etc/vault/secrets:ro
       - ./entrypoint.sh:/entrypoint.sh:ro
+      - hf-cache:/home/appuser/.cache/huggingface
+    # host video/render GIDs — verify with ls -l /dev/nvidia*
+    # group_add: ["44", "107"]
     deploy:
       resources:
         reservations:
@@ -82,3 +93,6 @@ services:
 networks:
   secrets-net:
     external: true
+
+volumes:
+  hf-cache:
