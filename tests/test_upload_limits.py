@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from gigaam_transcriber import rate_limit
-from tests.conftest import setup_auth_override
+from tests.conftest import make_mock_user
 
 MB = 1024 * 1024
 
@@ -34,6 +34,7 @@ def client():
         patch("routers.transcription.track_usage"),
     ):
         from api import app
+        import routers.transcription as transcription_module
 
         import asyncio
 
@@ -45,9 +46,14 @@ def client():
 
         asyncio.run(_create_tables())
 
-        setup_auth_override(app)
+        # Key on the function object the routers actually reference:
+        # test_settings_validation reloads gigaam_transcriber.auth, which
+        # would otherwise leave this override keyed on a stale function.
+        auth_fn = transcription_module.get_current_user
+        app.dependency_overrides[auth_fn] = lambda: make_mock_user()
         with TestClient(app) as c:
             yield c, mock_transcriber
+        app.dependency_overrides.pop(auth_fn, None)
         app.dependency_overrides.clear()
 
 
