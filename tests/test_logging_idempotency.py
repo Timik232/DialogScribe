@@ -53,7 +53,7 @@ def test_concurrent_setup_logging_single_handler(tmp_path):
         setup_logging(log_file=log_file)
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        list(pool.map(call_setup, range(8)))
+        list(pool.map(lambda _: call_setup(), range(8)))
 
     handlers = _rotating_handlers()
     assert len(handlers) == 1
