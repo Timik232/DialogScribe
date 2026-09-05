@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import uuid
@@ -335,10 +336,11 @@ async def analyze_transcription(
         raise HTTPException(status_code=400, detail="Transcription has no text to analyze")
 
     try:
-        summary_md = await generate_summary(obj.full_text, "general", llm_client)
-        mindmap_md = generate_mindmap_markdown(obj.full_text, llm_client)
-        insights = extract_action_items(obj.full_text, llm_client)
-        steps = generate_suggested_steps(obj.full_text, llm_client)
+        full_text = obj.full_text
+        summary_md = await generate_summary(full_text, "general", llm_client)
+        mindmap_md = await asyncio.to_thread(generate_mindmap_markdown, full_text, llm_client)
+        insights = await asyncio.to_thread(extract_action_items, full_text, llm_client)
+        steps = await asyncio.to_thread(generate_suggested_steps, full_text, llm_client)
 
         insights_parts = []
         if insights.get("action_items"):

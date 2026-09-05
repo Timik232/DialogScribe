@@ -139,27 +139,17 @@ async def run_autoflow(
             emit(AutoflowStage.SUMMARY, 0.4, "Генерация саммари...")
             try:
                 t0 = time.monotonic()
-                if template_key in SUMMARY_TEMPLATES:
-                    # generate_summary only touches db for template lookup; builtin
-                    # keys resolve without it, so run the blocking LLM work in a
-                    # worker thread to keep the loop responsive to cancellation.
-                    summary_md = await loop.run_in_executor(
-                        None,
-                        lambda: asyncio.run(
-                            generate_summary(
-                                transcription_text, template_key, llm_client, model=model
-                            )
-                        ),
-                    )
-                else:
-                    summary_md = await generate_summary(
-                        transcription_text,
-                        template_key,
-                        llm_client,
-                        db=db,
-                        user_id=user_id,
-                        model=model,
-                    )
+                # generate_summary resolves templates on the loop and offloads
+                # the blocking LLM compute via asyncio.to_thread, so awaiting
+                # it directly keeps the loop responsive to cancellation.
+                summary_md = await generate_summary(
+                    transcription_text,
+                    template_key,
+                    llm_client,
+                    db=db,
+                    user_id=user_id,
+                    model=model,
+                )
                 result.stage_timings["summary"] = time.monotonic() - t0
                 result.summary_text = summary_md
                 emit(AutoflowStage.SUMMARY, 0.6, "Саммари создано")

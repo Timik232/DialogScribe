@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -114,7 +116,9 @@ async def post_mindmap(
     await check_limit(db, user.id, "llm_call")
 
     try:
-        md_result = generate_mindmap_markdown(body.text, llm_client, model=body.model)
+        md_result = await asyncio.to_thread(
+            generate_mindmap_markdown, body.text, llm_client, model=body.model
+        )
         await track_usage(db, user.id, "llm_call", 1.0)
         return {"mindmap_markdown": md_result}
     except ValueError as exc:
@@ -139,9 +143,17 @@ async def post_insights(
 
     try:
         if body.include_action_items:
-            result.update(extract_action_items(body.text, llm_client, model=body.model))
+            result.update(
+                await asyncio.to_thread(
+                    extract_action_items, body.text, llm_client, model=body.model
+                )
+            )
         if body.include_suggested_steps:
-            result.update(generate_suggested_steps(body.text, llm_client, model=body.model))
+            result.update(
+                await asyncio.to_thread(
+                    generate_suggested_steps, body.text, llm_client, model=body.model
+                )
+            )
         await track_usage(db, user.id, "llm_call", 1.0)
         return result
     except ValueError as exc:
@@ -167,7 +179,8 @@ async def post_chat(
         raise HTTPException(status_code=400, detail="messages must not be empty")
 
     try:
-        result = chat_with_transcript(
+        result = await asyncio.to_thread(
+            chat_with_transcript,
             text=body.text,
             messages=[m.model_dump() for m in body.messages],
             model=body.model,
