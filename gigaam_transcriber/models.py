@@ -35,6 +35,31 @@ class User(Base):
     approver = relationship("User", remote_side=lambda: [User.id], foreign_keys=[approved_by])
 
 
+class RefreshSession(Base):
+    """Server-side state for one issued refresh token (Task 7).
+
+    Keyed by the SHA-256 hex of the JWT ``jti`` claim — raw refresh tokens
+    are never persisted. A row is "live" while ``revoked_at`` is NULL and
+    ``expires_at`` is in the future; ``rotated_to_hashed_jti`` links a
+    rotated token to its successor so a replayed (already-used) token can
+    revoke the whole descendant chain.
+    """
+
+    __tablename__ = "refresh_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    hashed_jti: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    rotated_to_hashed_jti: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
+    user_agent: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
+    ip: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
+
+    user = relationship("User", backref="refresh_sessions")
+
+
 class Template(Base):
     __tablename__ = "templates"
 
