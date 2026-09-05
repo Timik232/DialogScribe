@@ -32,6 +32,7 @@ services:
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
     command: ["python", "api.py"]
     environment:
+      - ENVIRONMENT=production
       - ASR_URL=https://api.mistral.ai
       - ASR_MODEL=voxtral-mini-latest
       - PYANNOTE_MODEL=pyannote/speaker-diarization-3.1
@@ -40,7 +41,14 @@ services:
       # GRADIO_USERNAME and GRADIO_PASSWORD are loaded from Vault via entrypoint.sh
       # Do NOT set them here — they would override Vault values with empty strings
       - PROXY_URL=http://127.0.0.1:7890
+      # Fail-closed secrets: startup ABORTS in production when JWT_SECRET is
+      # missing/short (<32 chars), or when V1_API_ENABLED=true without a
+      # strong API_KEY distinct from JWT_SECRET. JWT_SECRET may come from the
+      # host environment or from Vault (vault/secrets.env.tmpl); API_KEY is
+      # only required when V1_API_ENABLED=true.
+      - JWT_SECRET=${JWT_SECRET:-}
       - API_KEY=${API_KEY:-}
+      - V1_API_ENABLED=${V1_API_ENABLED:-false}
       - MAX_UPLOAD_SIZE_MB=${MAX_UPLOAD_SIZE_MB:-1024}
       - DATABASE_URL=${DATABASE_URL:-}
       - ADMIN_EMAIL=${ADMIN_EMAIL:-}

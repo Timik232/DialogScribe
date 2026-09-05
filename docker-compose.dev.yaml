@@ -15,18 +15,22 @@ services:
       - LLM_API_KEY=${LLM_API_KEY:-}
       - LLM_BASE_URL=https://api.mistral.ai/v1
       - LLM_MODEL=mistral-small-latest
-      # Auth
-      - JWT_SECRET=${JWT_SECRET:-dev-secret-change-in-prod}
+      # Auth — dev-only secrets MUST come from the operator's environment
+      # (.env.dev, gitignored). No committed defaults: compose refuses to
+      # start without explicit values.
+      - ENVIRONMENT=development
+      - JWT_SECRET=${JWT_SECRET:?set JWT_SECRET in .env.dev (dev-only value, >=32 chars)}
       - API_KEY=${API_KEY:-}
+      - V1_API_ENABLED=${V1_API_ENABLED:-false}
       # Database (SQLite inside container)
       - DATABASE_URL=sqlite+aiosqlite:////app/data/dialogscribe.db
       # Server
       - HOST=0.0.0.0
       - PORT=7860
       - MAX_UPLOAD_SIZE_MB=500
-      # Bootstrap admin
-      - ADMIN_EMAIL=admin@local.dev
-      - ADMIN_PASSWORD=admin123
+      # Bootstrap admin (dev-only credentials from operator env, no defaults)
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@local.dev}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env.dev (dev-only value)}
       # Frontend origin (CoPilot Sales dev server)
       - FRONTEND_URL=http://localhost:5173
     volumes:
