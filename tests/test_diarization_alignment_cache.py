@@ -12,7 +12,9 @@ import time
 import unittest
 from unittest import mock
 
-import torch
+import pytest
+
+torch = pytest.importorskip("torch")
 
 from gigaam_transcriber import diarization as dz
 from gigaam_transcriber.diarization import (
