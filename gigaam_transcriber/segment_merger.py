@@ -194,6 +194,9 @@ class SegmentMerger:
             return segments
         
         min_duration = min_duration or self.config.min_segment_duration
+        # Копия: слияние перезаписывает ещё не обработанные элементы,
+        # входной список изменять нельзя
+        segments = list(segments)
         
         result = []
         i = 0
@@ -320,6 +323,10 @@ class SegmentMerger:
         min_duration = min_duration if min_duration is not None else self.config.min_presplit_duration
         sorted_segments = sorted(segments, key=lambda s: s.start)
         
+        # Результат собирается из копий: входные сегменты не мутируются
+        def copy_segment(seg: SpeakerSegment) -> SpeakerSegment:
+            return SpeakerSegment(start=seg.start, end=seg.end, speaker=seg.speaker)
+        
         result: List[SpeakerSegment] = []
         i = 0
         
@@ -338,7 +345,7 @@ class SegmentMerger:
                         prev_in_result.end = current.end
                         i += 1
                         continue
-                result.append(current)
+                result.append(copy_segment(current))
                 i += 1
                 continue
 
@@ -368,7 +375,7 @@ class SegmentMerger:
                         i += 1  # пропускаем next, он уже объединён
 
             if not merged_with_prev and not merged_with_next:
-                result.append(current)
+                result.append(copy_segment(current))
 
             i += 1
         

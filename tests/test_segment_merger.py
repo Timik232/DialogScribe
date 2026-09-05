@@ -294,3 +294,63 @@ class TestMergeShortSpeakerSegments:
         assert result[0].start == 0.0
         assert result[0].end == 5.3
         assert result[0].speaker == 'A'
+
+
+class TestNonMutatingMerges:
+    """Task 16: слияние не мутирует входные сегменты и списки."""
+
+    def test_merge_short_speaker_segments_does_not_mutate_inputs(self):
+        merger = SegmentMerger(MergeConfig(min_presplit_duration=1.0))
+        segments = [
+            SpeakerSegment(start=0.0, end=0.2, speaker='A'),
+            SpeakerSegment(start=0.3, end=2.0, speaker='A'),
+            SpeakerSegment(start=2.1, end=2.2, speaker='B'),
+            SpeakerSegment(start=2.3, end=4.0, speaker='B'),
+        ]
+        snapshot = [(s.start, s.end, s.speaker) for s in segments]
+
+        result = merger.merge_short_speaker_segments(segments)
+
+        assert [(s.start, s.end, s.speaker) for s in segments] == snapshot
+        assert len(segments) == 4
+        assert len(result) == 2
+        # результат собран из копий, а не из входных объектов
+        for out in result:
+            for original in segments:
+                assert out is not original
+        # мутация результата не затрагивает входные сегменты
+        for out in result:
+            out.end = 999.0
+        assert [(s.start, s.end, s.speaker) for s in segments] == snapshot
+
+    def test_merge_short_speaker_segments_absorb_keeps_input_intact(self):
+        merger = SegmentMerger(MergeConfig(min_presplit_duration=1.0))
+        segments = [
+            SpeakerSegment(start=0.0, end=0.4, speaker='A'),
+            SpeakerSegment(start=0.5, end=3.0, speaker='A'),
+        ]
+        snapshot = [(s.start, s.end, s.speaker) for s in segments]
+
+        result = merger.merge_short_speaker_segments(segments)
+
+        assert len(result) == 1
+        assert result[0].end == 3.0
+        assert [(s.start, s.end, s.speaker) for s in segments] == snapshot
+        assert segments[1].end == 3.0
+        assert result[0] is not segments[0]
+
+    def test_merge_short_segments_does_not_mutate_input_list(self):
+        merger = SegmentMerger(MergeConfig(min_segment_duration=0.5))
+        segments = [
+            TranscriptionSegment(text="а", start=0.0, end=0.1, speaker='A'),
+            TranscriptionSegment(text="б", start=0.2, end=1.0, speaker='A'),
+        ]
+        snapshot = [(s.text, s.start, s.end) for s in segments]
+
+        result = merger.merge_short_segments(segments)
+
+        assert len(result) == 1
+        assert result[0].text == "а б"
+        assert [(s.text, s.start, s.end) for s in segments] == snapshot
+        assert segments[1].text == "б"
+        assert len(segments) == 2
