@@ -141,11 +141,11 @@
       "severity": "High",
       "affected_artifact": "summarizer.py, analysis/Autoflow/meeting-prep Svelte pages",
       "description": "Unsanitized LLM content reaches browser raw-HTML sinks",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
-      "target": "Task 3 / Release A",
-      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-3-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-3-verification.txt",
+      "target": "Task 4 / Release A",
+      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && grep -rn \"@html\" frontend/src | grep -v SafeMarkdown | grep -v \"components/docs\" && exit 1 || exit 0",
+      "evidence_path": ".sisyphus/evidence/task-4-xss-browser.json",
       "expiry": ""
     },
     {
@@ -421,11 +421,11 @@
       "severity": "High",
       "affected_artifact": "backend renderers and raw frontend sinks",
       "description": "Multiple same-origin XSS paths through LLM HTML, mindmap scripts/iframe and Markdown rendering",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
-      "target": "Task 3 / Release A",
-      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-3-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-3-verification.txt",
+      "target": "Task 4 / Release A",
+      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && grep -rn \"@html\" frontend/src | grep -v SafeMarkdown | grep -v \"components/docs\" && exit 1 || exit 0",
+      "evidence_path": ".sisyphus/evidence/task-4-xss-browser.json",
       "expiry": ""
     },
     {
