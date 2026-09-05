@@ -182,6 +182,9 @@ async def login(
         user_agent=request.headers.get("user-agent"),
         ip=_client_ip(request),
     )
+    # Commit before the cookie goes out: get_db's teardown commit races the
+    # response on real sockets, and a refresh arriving early would find no row.
+    await db.commit()
 
     _set_auth_cookies(response, refresh_token, secrets.token_urlsafe(32))
 
@@ -243,6 +246,10 @@ async def refresh(
         user_agent=request.headers.get("user-agent"),
         ip=_client_ip(request),
     )
+    # The successor row and the revocation must be durable before the new
+    # cookie is handed out, otherwise back-to-back requests can double-spend
+    # the old token (teardown commit races the response on real sockets).
+    await db.commit()
     _set_auth_cookies(response, new_refresh, csrf_token or secrets.token_urlsafe(32))
 
     return TokenResponse(access_token=access_token)
@@ -267,6 +274,7 @@ async def logout(
             session = await get_refresh_session(db, hash_jti(jti))
             if session:
                 await revoke_refresh_chain(db, session)
+                await db.commit()
     _clear_auth_cookies(response)
     return {"message": "Logged out"}
 

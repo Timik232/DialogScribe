@@ -492,12 +492,13 @@
       "severity": "Medium",
       "affected_artifact": "compose, routers/auth.py",
       "description": "Host networking/direct bind bypasses intended HTTPS boundary; production cookies are not Secure",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 7 / Release B",
-      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-7-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-7-verification.txt",
-      "expiry": ""
+      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && JWT_SECRET=ci-test-only python -m pytest tests/test_session_revocation.py -q -p no:cacheprovider",
+      "evidence_path": ".sisyphus/evidence/task-7-refresh-revocation.txt",
+      "expiry": "",
+      "notes": "Task 7: login/refresh now set refresh_token HttpOnly; SameSite=lax; Path=/api/auth; Max-Age=refresh lifetime; Secure mandatory outside ENVIRONMENT=development (gigaam_transcriber/settings.is_development). Live Set-Cookie flags captured in evidence; dev-vs-prod flag matrix covered by TestCookiesAndCsrf."
     },
     {
       "id": "SEC-M2",
@@ -520,12 +521,13 @@
       "severity": "Medium",
       "affected_artifact": "routers/auth.py",
       "description": "Login/register/refresh/forgot/reset have no rate limiting",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 7 / Release B",
-      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-7-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-7-verification.txt",
-      "expiry": ""
+      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && JWT_SECRET=ci-test-only python -m pytest tests/test_rate_limit.py -q -p no:cacheprovider",
+      "evidence_path": ".sisyphus/evidence/task-7-abuse-controls.txt",
+      "expiry": "",
+      "notes": "Task 7: in-memory token buckets (gigaam_transcriber/rate_limit.py) on login 5/min, register 3/min, forgot 3/min, reset 5/min, refresh 30/min (IP-keyed), /v1 30/min, chat 20/min, upload 10/min (user-keyed); 429 + Retry-After + generic body; RATE_LIMIT_<BUCKET> env tunables."
     },
     {
       "id": "SEC-M4",
@@ -540,7 +542,7 @@
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && JWT_SECRET=ci-test-only python -m pytest tests/test_settings_validation.py -q -p no:cacheprovider",
       "evidence_path": ".sisyphus/evidence/task-6-valid-secrets.txt",
       "expiry": "",
-      "notes": "Task 6: JWT_SECRET is read solely from gigaam_transcriber/settings.py; the API_KEY fallback is removed and tokens never verify under API_KEY (evidence: task-6-valid-secrets.txt). Session revocation / password-reset revocation half of this row remains Task 7 scope."
+      "notes": "Task 6: JWT_SECRET is read solely from gigaam_transcriber/settings.py; the API_KEY fallback is removed (evidence: task-6-valid-secrets.txt). Task 7 completes the revocation half: refresh sessions are DB-backed (refresh_sessions, hashed jti only), rotation is single-use with replay chain-kill, and logout/password-reset/admin-disable revoke sessions (evidence: task-7-refresh-revocation.txt)."
     },
     {
       "id": "SEC-M5",

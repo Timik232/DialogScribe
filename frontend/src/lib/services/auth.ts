@@ -1,5 +1,13 @@
 const API_BASE = "";
 
+function readCsrfToken(): string {
+	if (typeof document === "undefined") return "";
+	const match = document.cookie
+		.split("; ")
+		.find((row) => row.startsWith("csrf_token="));
+	return match ? decodeURIComponent(match.split("=").slice(1).join("=")) : "";
+}
+
 export interface TokenResponse {
 	access_token: string;
 	token_type: string;
@@ -52,6 +60,7 @@ export async function refreshToken(): Promise<TokenResponse> {
 	const res = await fetch(`${API_BASE}/api/auth/refresh`, {
 		method: "POST",
 		credentials: "include",
+		headers: { "X-CSRF-Token": readCsrfToken() },
 	});
 
 	if (!res.ok) {
@@ -65,6 +74,7 @@ export async function logout(): Promise<void> {
 	await fetch(`${API_BASE}/api/auth/logout`, {
 		method: "POST",
 		credentials: "include",
+		headers: { "X-CSRF-Token": readCsrfToken() },
 	});
 }
 

@@ -12,12 +12,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
-from gigaam_transcriber.auth import create_refresh_token, decode_token, get_admin_user, hash_password
+from gigaam_transcriber.auth import (
+    create_refresh_token,
+    decode_token,
+    get_admin_user,
+    hash_password,
+)
 from gigaam_transcriber.database import Base, async_session_factory, engine
 from gigaam_transcriber.models import RefreshSession, User
 from gigaam_transcriber.sessions import hash_jti
-from sqlalchemy import select
 
 PASSWORD = "Passw0rd!123"
 
