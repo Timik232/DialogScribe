@@ -174,7 +174,7 @@ class _ProviderSession:
     def gather(
         self,
         method_name: str,
-        arg_sets: List[tuple],
+        arg_sets: List[tuple[Any, ...]],
         *,
         kwargs: Optional[Dict[str, Any]] = None,
         limit: Optional[int] = None,
@@ -196,14 +196,14 @@ class _ProviderSession:
     async def _gather_async(
         self,
         method_name: str,
-        arg_sets: List[tuple],
+        arg_sets: List[tuple[Any, ...]],
         kwargs: Dict[str, Any],
         limit: int,
     ) -> List[Any]:
         method = getattr(self._provider, method_name)
         semaphore = asyncio.Semaphore(limit)
 
-        async def _one(args: tuple) -> Any:
+        async def _one(args: tuple[Any, ...]) -> Any:
             async with semaphore:
                 if self._cancelled.is_set():
                     raise asyncio.CancelledError()
