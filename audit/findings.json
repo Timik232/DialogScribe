@@ -72,11 +72,11 @@
       "severity": "High",
       "affected_artifact": "gigaam_transcriber/transcriber.py, litellm_client.py",
       "description": "Shared async ASR client crosses worker threads/event loops through repeated asyncio.run",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 13 / Release C",
-      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-13-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-13-verification.txt",
+      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && python -m pytest -q tests/test_asr_lifecycle.py",
+      "evidence_path": ".sisyphus/evidence/task-13-asr-concurrency.txt",
       "expiry": ""
     },
     {
@@ -213,11 +213,11 @@
       "severity": "Medium",
       "affected_artifact": "LLM/ASR client modules",
       "description": "LLM/httpx clients lack complete close/lifecycle management",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 13 / Release C",
-      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-13-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-13-verification.txt",
+      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && python -m pytest -q tests/test_asr_lifecycle.py",
+      "evidence_path": ".sisyphus/evidence/task-13-asr-cleanup.txt",
       "expiry": ""
     },
     {
