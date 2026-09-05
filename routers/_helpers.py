@@ -20,10 +20,29 @@ from gigaam_transcriber.exceptions import (
     UnsupportedFormatError,
 )
 from gigaam_transcriber.settings import API_KEY, V1_API_ENABLED
+from routers.correlation import get_correlation_id
 
 logger = logging.getLogger("dialogscribe-api")
 security = HTTPBearer(auto_error=False)
 SUPPORTED_EXTENSIONS = AudioProcessor.AUDIO_FORMATS | AudioProcessor.VIDEO_FORMATS
+
+
+def api_error(status_code: int, code: str, message: str) -> HTTPException:
+    """Public error payload: stable code + message + correlation id only.
+
+    Raw exception text must never reach the client through this helper;
+    the correlation id links the response to server-side log detail.
+    """
+    return HTTPException(
+        status_code=status_code,
+        detail={
+            "error": {
+                "code": code,
+                "message": message,
+                "correlation_id": get_correlation_id(),
+            }
+        },
+    )
 
 
 def _openai_error(message: str, err_type: str, code: int) -> dict[str, dict[str, str | int]]:
@@ -125,6 +144,19 @@ def _result_response(result: TranscriptionResult, response_format: str) -> Respo
     )
 
 
+_PUBLIC_MESSAGES: dict[type[Exception], str] = {
+    AudioTooShortError: "Audio is too short to transcribe",
+    EmptyFileError: "Uploaded file is empty",
+    EmptyAudioError: "Audio contains no usable signal",
+    UnsupportedFormatError: "Unsupported media format",
+    FileNotFoundError: "File not found",
+    ASRError: "Speech recognition provider error",
+    AudioProcessingError: "Audio processing failed",
+    DiarizationError: "Speaker diarization failed",
+    TranscriberError: "Transcription failed",
+}
+
+
 def _handle_transcription_exception(exc: Exception) -> HTTPException:
     status_map: list[tuple[type[Exception], int]] = [
         (AudioTooShortError, 400),
@@ -139,11 +171,26 @@ def _handle_transcription_exception(exc: Exception) -> HTTPException:
     ]
     for exc_type, code in status_map:
         if isinstance(exc, exc_type):
+            # OpenAI-compatible /v1 shape: the message is a stable public
+            # string (exception text may embed provider bodies or paths);
+            # correlation_id ties the response to server-side log detail.
             return HTTPException(
-                status_code=code, detail=_openai_error(str(exc), type(exc).__name__, code)
+                status_code=code,
+                detail=_openai_error(
+                    _PUBLIC_MESSAGES[exc_type], type(exc).__name__, code
+                )
+                | {"correlation_id": get_correlation_id()},
             )
-    logger.exception("Unhandled error during transcription")
-    return HTTPException(status_code=500, detail=_openai_error(str(exc), type(exc).__name__, 500))
+    logger.exception(
+        "Unhandled transcription error (correlation_id=%s)", get_correlation_id()
+    )
+    return HTTPException(
+        status_code=500,
+        detail=_openai_error(
+            "Internal server error", type(exc).__name__, 500
+        )
+        | {"correlation_id": get_correlation_id()},
+    )
 
 
 

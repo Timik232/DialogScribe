@@ -22,7 +22,8 @@ from gigaam_transcriber.models import User
 from gigaam_transcriber.rate_limit import user_rate_limit
 from gigaam_transcriber.usage import track_usage
 
-from routers._helpers import logger
+from routers._helpers import api_error, logger
+from routers.correlation import get_correlation_id
 
 router = APIRouter(prefix="/api", tags=["analysis"])
 
@@ -100,10 +101,10 @@ async def post_summary(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ConnectionError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise api_error(502, "upstream_unavailable", "Upstream LLM provider is unavailable") from exc
     except Exception as exc:
-        logger.exception("Summary generation failed")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.exception("Summary generation failed (correlation_id=%s)", get_correlation_id())
+        raise api_error(500, "internal_error", "Internal server error") from exc
 
 
 @router.post("/mindmap")
@@ -124,10 +125,10 @@ async def post_mindmap(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ConnectionError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise api_error(502, "upstream_unavailable", "Upstream LLM provider is unavailable") from exc
     except Exception as exc:
-        logger.exception("Mindmap generation failed")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.exception("Mindmap generation failed (correlation_id=%s)", get_correlation_id())
+        raise api_error(500, "internal_error", "Internal server error") from exc
 
 
 @router.post("/insights")
@@ -159,10 +160,10 @@ async def post_insights(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ConnectionError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise api_error(502, "upstream_unavailable", "Upstream LLM provider is unavailable") from exc
     except Exception as exc:
-        logger.exception("Insights extraction failed")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.exception("Insights extraction failed (correlation_id=%s)", get_correlation_id())
+        raise api_error(500, "internal_error", "Internal server error") from exc
 
 
 @router.post("/chat", dependencies=[Depends(user_rate_limit("chat"))])
@@ -191,10 +192,10 @@ async def post_chat(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ConnectionError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise api_error(502, "upstream_unavailable", "Upstream LLM provider is unavailable") from exc
     except Exception as exc:
-        logger.exception("Chat failed")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.exception("Chat failed (correlation_id=%s)", get_correlation_id())
+        raise api_error(500, "internal_error", "Internal server error") from exc
 
 
 @router.get("/models")
@@ -203,5 +204,5 @@ def get_models(_user: User = Depends(get_current_user)) -> dict:
         models = get_available_models()
         return {"models": [{"id": m, "name": m} for m in models]}
     except Exception as exc:
-        logger.exception("Failed to list models")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.exception("Failed to list models (correlation_id=%s)", get_correlation_id())
+        raise api_error(500, "internal_error", "Internal server error") from exc

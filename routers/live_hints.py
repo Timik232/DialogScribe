@@ -31,6 +31,7 @@ from gigaam_transcriber.llm_cascade import LLMCascade
 from gigaam_transcriber.meeting_brief_models import BriefUpdateMessage
 from gigaam_transcriber.models import UserSettings
 from gigaam_transcriber.summarizer import LLMClient, LLMClientConfig
+from routers.correlation import get_correlation_id
 from gigaam_transcriber.ws_protocol import (
     WS_PROTOCOL_VERSION,
     OutboundChannel,
@@ -475,10 +476,16 @@ async def live_hints_ws(ws: WebSocket):
     except WebSocketDisconnect:
         logger.info("Live-hints WebSocket disconnected")
     except Exception as e:
-        logger.exception("Live-hints WebSocket error")
+        logger.exception(
+            "Live-hints WebSocket error (correlation_id=%s)", get_correlation_id()
+        )
         try:
             await channel.close_terminal(
-                ErrorMessage(code="server", message=str(e)).model_dump()
+                ErrorMessage(
+                    code="server",
+                    message="Internal server error",
+                    correlation_id=get_correlation_id(),
+                ).model_dump()
             )
         except Exception:
             logger.debug("failed to deliver terminal error event", exc_info=True)

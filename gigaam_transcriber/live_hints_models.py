@@ -111,6 +111,7 @@ class ErrorMessage(BaseModel):
     type: Literal["error"] = "error"
     code: str
     message: str
+    correlation_id: str | None = None
 
 
 class StatusMessage(BaseModel):

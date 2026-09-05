@@ -32,6 +32,7 @@ from routers._uploads import (
     spool_upload,
     sweep_stale_tempfiles,
 )
+from routers.correlation import CorrelationIdMiddleware, install_correlation_logging
 
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "7860"))
@@ -52,6 +53,7 @@ _BUILD_DIR = Path(__file__).parent / "frontend" / "build"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
+    install_correlation_logging()
     transcriber = GigaAMTranscriber()
     app.state.transcriber = transcriber
     logger.info("DialogScribe API starting — transcriber initialized")
@@ -83,6 +85,8 @@ app = FastAPI(
 # Registered before the security-headers decorator so the raw-body 413
 # responses still flow outward through it (and keep CSP headers).
 app.add_middleware(BodySizeLimitMiddleware)
+app.add_middleware(CorrelationIdMiddleware)
+install_correlation_logging()
 
 # Defense-in-depth browser hardening for every response (SPA included):
 # scripts/styles/images only from same origin, no plugins/frames, and no

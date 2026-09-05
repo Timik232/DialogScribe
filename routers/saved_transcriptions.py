@@ -21,7 +21,8 @@ from gigaam_transcriber.models import SavedTranscription, User
 from gigaam_transcriber.summarizer import LLMClient, generate_summary
 from gigaam_transcriber.usage import track_usage
 
-from routers._helpers import logger
+from routers._helpers import api_error, logger
+from routers.correlation import get_correlation_id
 
 router = APIRouter(prefix="/api", tags=["saved-transcriptions"])
 
@@ -408,10 +409,10 @@ async def analyze_transcription(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ConnectionError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise api_error(502, "upstream_unavailable", "Upstream LLM provider is unavailable") from exc
     except Exception as exc:
-        logger.exception("Analysis failed")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.exception("Analysis failed (correlation_id=%s)", get_correlation_id())
+        raise api_error(500, "internal_error", "Internal server error") from exc
 
 
 # ── Share endpoints ──────────────────────────────────────────────────

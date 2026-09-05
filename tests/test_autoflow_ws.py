@@ -215,7 +215,9 @@ class TestAutoflowWsHappyPath:
                 while True:
                     msg = ws.receive_json()
                     if msg["type"] == "error":
-                        assert "transcriber exploded" in msg["message"]
+                        assert msg["code"] == "internal_error"
+                        assert msg["message"] == "Internal server error"
+                        assert msg["correlation_id"]
                         break
         assert ds_files(ws_env) == []
 

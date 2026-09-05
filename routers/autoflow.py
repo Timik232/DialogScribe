@@ -11,6 +11,7 @@ from gigaam_transcriber.database import async_session_factory
 from gigaam_transcriber.limits import check_limit
 from gigaam_transcriber.summarizer import LLMClient, LLMClientConfig
 from gigaam_transcriber.usage import track_usage
+from routers.correlation import get_correlation_id
 from gigaam_transcriber.ws_protocol import (
     WS_PROTOCOL_VERSION,
     BinaryUpload,
@@ -233,10 +234,19 @@ async def autoflow_ws(ws: WebSocket):
     except WebSocketDisconnect:
         logger.info("Autoflow WebSocket disconnected")
     except Exception as e:
-        logger.exception("Autoflow WebSocket error")
+        logger.exception(
+            "Autoflow WebSocket error (correlation_id=%s)", get_correlation_id()
+        )
         try:
             await channel.close_terminal(
-                {"type": "error", "stage": "error", "session_id": session_id, "message": str(e)}
+                {
+                    "type": "error",
+                    "stage": "error",
+                    "session_id": session_id,
+                    "code": "internal_error",
+                    "message": "Internal server error",
+                    "correlation_id": get_correlation_id(),
+                }
             )
         except Exception:
             logger.debug("failed to deliver terminal error event", exc_info=True)
