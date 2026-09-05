@@ -336,3 +336,64 @@ class TestChunkingLogging:
                              if r.name == "gigaam_transcriber.meeting_prep.service"]
         assert any("chunk" in msg.lower() or "map-reduce" in msg.lower()
                     for msg in meeting_prep_logs)
+
+
+# ---------------------------------------------------------------------------
+# 6. Reduce stage must include catalog_data (CQ-H8)
+# ---------------------------------------------------------------------------
+
+
+def _mock_openai_response(text: str):
+    resp = MagicMock()
+    resp.choices = [MagicMock()]
+    resp.choices[0].message.content = text
+    resp.usage.prompt_tokens = len(text)
+    resp.usage.completion_tokens = len(text)
+    return resp
+
+
+class TestCatalogInReduce:
+    @pytest.mark.asyncio
+    async def test_map_reduce_reduce_prompt_contains_catalog(self):
+        """Long-context reduce must actually send catalog_data to the LLM."""
+        from gigaam_transcriber.meeting_prep.service import generate_meeting_prep
+
+        client, mock_openai = _make_client()
+        client._config = LLMClientConfig(api_key="sk-test", model="gpt-4")
+        client._client = mock_openai
+        call_count = [0]
+        captured: list[list[dict]] = []
+
+        def side_effect(**kwargs):
+            call_count[0] += 1
+            captured.append(kwargs["messages"])
+            if call_count[0] <= 3:
+                return _mock_openai_response(f"Анализ части {call_count[0]}")
+            return _mock_openai_response("# План подготовки к встрече\nИтог")
+
+        mock_openai.chat.completions.create.side_effect = side_effect
+
+        long_company_data = ". ".join(
+            f"Компания ООО Ромашка. ИНН 1234567890. Сделка #{i} на сумму {i * 1000} руб."
+            for i in range(60)
+        )
+        catalog_data = "УНИКАЛЬНЫЙ_КАТАЛОГ_XYZ: CRM-система, ERP-модуль"
+
+        result, model_used = await generate_meeting_prep(
+            long_company_data, catalog_data, client
+        )
+
+        assert "План подготовки" in result
+        assert model_used == "gpt-4"
+        assert call_count[0] >= 2, "expected map-reduce (>= 2 calls)"
+
+        map_users = [msgs[-1]["content"] for msgs in captured[:-1]]
+        assert any("<company-data-part" in u for u in map_users)
+
+        reduce_messages = captured[-1]
+        reduce_user = reduce_messages[-1]["content"]
+        assert "<catalog-data>" in reduce_user
+        assert "УНИКАЛЬНЫЙ_КАТАЛОГ_XYZ" in reduce_user, (
+            "catalog_data must reach the LLM in the reduce stage"
+        )
+        assert "каталог" in reduce_messages[0]["content"].lower()

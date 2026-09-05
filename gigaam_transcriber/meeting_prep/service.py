@@ -233,15 +233,17 @@ async def generate_meeting_prep(
             )
             chunk_summaries.append(summary)
 
-        combined_summaries = "\n\n---\n\n".join(chunk_summaries)
-        reduce_message = (
-            f"АНАЛИЗ ДАННЫХ О КОМПАНИИ:\n{combined_summaries}\n\n"
-            f"КАТАЛОГ ПРОДУКТОВ:\n{catalog_data}"
+        reduce_prompt = (
+            SYSTEM_PROMPT
+            + "\n\nДополнение: ниже чередуются частичные анализы данных о компании "
+            "(разделяются «---»), а в конце приведён полный каталог продуктов внутри "
+            "тегов <catalog-data>. Используй ОБА источника для итогового плана."
         )
+        reduce_inputs = chunk_summaries + [f"<catalog-data>\n{catalog_data}\n</catalog-data>"]
         result = await asyncio.to_thread(
             _hierarchical_reduce,
-            chunk_summaries,
-            SYSTEM_PROMPT,
+            reduce_inputs,
+            reduce_prompt,
             llm_client,
             model=effective_model,
         )
