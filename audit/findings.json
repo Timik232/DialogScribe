@@ -227,12 +227,13 @@
       "severity": "Medium",
       "affected_artifact": "routers/exports.py",
       "description": "Export exceptions can leak temporary files",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 15 / Release C",
-      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-15-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-15-verification.txt",
-      "expiry": ""
+      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && python -m pytest -q tests/test_subprocess_safety.py tests/test_export_resource_safety.py",
+      "evidence_path": ".sisyphus/evidence/task-15-resource-success.txt,.sisyphus/evidence/task-15-resource-failures.txt",
+      "expiry": "",
+      "remediation_note": "Guarded subprocess helper (timeout + start_new_session/killpg group kill, capped capture, path-sanitized errors, no shell=True) for every ffmpeg/ffprobe site incl. live-hints decode; tracked chunk workspace with partial-output removal on every exit; exports wrap temp creation + generators in outer try/except (stable sanitized 502/422, zero tempfile residue) and delete streamed files only after the response finishes (finally-guarded FileResponse)."
     },
     {
       "id": "CQ-M11",
