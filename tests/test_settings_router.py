@@ -9,6 +9,20 @@ from fastapi.testclient import TestClient
 from tests.conftest import make_mock_user, setup_auth_override
 
 
+def _collect_route_paths(routes):
+    paths = set()
+    for route in routes:
+        if hasattr(route, "original_router"):
+            paths.update(_collect_route_paths(route.original_router.routes))
+        elif hasattr(route, "routes"):
+            paths.update(_collect_route_paths(route.routes))
+        else:
+            path = getattr(route, "path", None)
+            if path:
+                paths.add(path)
+    return paths
+
+
 @pytest.fixture(scope="module")
 def client():
     from api import app
@@ -88,8 +102,6 @@ class TestSettingsRouter:
             setup_auth_override(app)
 
     def test_router_registered_under_api_settings(self, client):
-        paths = {
-            getattr(route, "path", "") for route in client.app.routes
-        }
+        paths = _collect_route_paths(client.app.routes)
 
         assert "/api/settings/asr-provider" in paths

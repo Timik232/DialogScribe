@@ -22,6 +22,12 @@ def _pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        if stat.rsplit(")", 1)[1].split()[0] == "Z":
+            return False
+    except (FileNotFoundError, OSError):
+        pass
     return True
 
 
