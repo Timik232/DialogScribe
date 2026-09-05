@@ -40,12 +40,12 @@ def create_access_token(user_id: str, role: str) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-def create_refresh_token(user_id: str) -> str:
+def create_refresh_token(user_id: str, jti: str | None = None) -> str:
     expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
     payload = {
         "sub": user_id,
         "type": "refresh",
-        "jti": str(uuid.uuid4()),
+        "jti": jti or str(uuid.uuid4()),
         "exp": expire,
         "iat": datetime.utcnow(),
     }

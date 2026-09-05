@@ -2,14 +2,16 @@ import hashlib
 import os
 import re
 import secrets
+import uuid
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gigaam_transcriber.auth import (
+    REFRESH_TOKEN_EXPIRE_DAYS,
     create_access_token,
     create_refresh_token,
     decode_token,
@@ -20,10 +22,27 @@ from gigaam_transcriber.auth import (
 from gigaam_transcriber.database import get_db
 from gigaam_transcriber.email import send_password_reset_email
 from gigaam_transcriber.models import User
+from gigaam_transcriber.sessions import (
+    create_refresh_session,
+    get_refresh_session,
+    hash_jti,
+    revoke_all_user_sessions,
+    revoke_refresh_chain,
+    rotate_refresh_session,
+)
 
 auth_router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
+
+REFRESH_COOKIE_MAX_AGE = REFRESH_TOKEN_EXPIRE_DAYS * 24 * 3600
+
+
+def _client_ip(request: Request) -> str | None:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else None
 
 
 class RegisterRequest(BaseModel):
@@ -86,7 +105,12 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
 
 
 @auth_router.post("/login", response_model=TokenResponse)
-async def login(body: LoginRequest, response: Response, db: AsyncSession = Depends(get_db)):
+async def login(
+    body: LoginRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(
         select(User).where((User.email == body.login) | (User.username == body.login))
     )
@@ -107,7 +131,16 @@ async def login(body: LoginRequest, response: Response, db: AsyncSession = Depen
         )
 
     access_token = create_access_token(user.id, user.role)
-    refresh_token = create_refresh_token(user.id)
+
+    jti = str(uuid.uuid4())
+    refresh_token = create_refresh_token(user.id, jti)
+    await create_refresh_session(
+        db,
+        user_id=user.id,
+        jti=jti,
+        user_agent=request.headers.get("user-agent"),
+        ip=_client_ip(request),
+    )
 
     response.set_cookie(
         key="refresh_token",
@@ -115,7 +148,7 @@ async def login(body: LoginRequest, response: Response, db: AsyncSession = Depen
         httponly=True,
         secure=False,
         samesite="lax",
-        max_age=7 * 24 * 3600,
+        max_age=REFRESH_COOKIE_MAX_AGE,
         path="/api/auth",
     )
 
@@ -124,6 +157,7 @@ async def login(body: LoginRequest, response: Response, db: AsyncSession = Depen
 
 @auth_router.post("/refresh", response_model=TokenResponse)
 async def refresh(
+    request: Request,
     response: Response,
     refresh_token: str = Cookie(None),
     db: AsyncSession = Depends(get_db),
@@ -135,6 +169,25 @@ async def refresh(
     if payload.get("type") != "refresh":
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
+    jti = payload.get("jti")
+    if not jti:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+    session = await get_refresh_session(db, hash_jti(jti))
+    if session is None:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+    if session.revoked_at is not None:
+        # Reuse of an already-consumed token: assume theft and kill the
+        # whole descendant chain before rejecting. get_db() rolls back on
+        # handler exceptions, so the chain-kill must be committed first.
+        await revoke_refresh_chain(db, session)
+        await db.commit()
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+    if session.expires_at <= datetime.utcnow():
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
     user_id = payload.get("sub")
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
@@ -144,14 +197,22 @@ async def refresh(
 
     access_token = create_access_token(user.id, user.role)
 
-    new_refresh = create_refresh_token(user.id)
+    new_jti = str(uuid.uuid4())
+    new_refresh = create_refresh_token(user.id, new_jti)
+    await rotate_refresh_session(
+        db,
+        session,
+        new_jti,
+        user_agent=request.headers.get("user-agent"),
+        ip=_client_ip(request),
+    )
     response.set_cookie(
         key="refresh_token",
         value=new_refresh,
         httponly=True,
         secure=False,
         samesite="lax",
-        max_age=7 * 24 * 3600,
+        max_age=REFRESH_COOKIE_MAX_AGE,
         path="/api/auth",
     )
 
@@ -159,7 +220,21 @@ async def refresh(
 
 
 @auth_router.post("/logout")
-async def logout(response: Response):
+async def logout(
+    response: Response,
+    refresh_token: str = Cookie(None),
+    db: AsyncSession = Depends(get_db),
+):
+    if refresh_token:
+        try:
+            payload = decode_token(refresh_token)
+        except HTTPException:
+            payload = {}
+        jti = payload.get("jti") if payload.get("type") == "refresh" else None
+        if jti:
+            session = await get_refresh_session(db, hash_jti(jti))
+            if session:
+                await revoke_refresh_chain(db, session)
     response.delete_cookie(key="refresh_token", path="/api/auth")
     return {"message": "Logged out"}
 
@@ -215,12 +290,13 @@ async def reset_password(body: ResetPasswordRequest, db: AsyncSession = Depends(
         user.reset_token_hash = None
         user.reset_token_expires = None
         await db.flush()
-        raise HTTPException(status_code=400, detail="Ссылка для сброса истекла")
+        raise HTTPException(status_code=400, detail="Недействительная или истёкшая ссылка")
 
     user.password_hash = hash_password(body.new_password)
 
     user.reset_token_hash = None
     user.reset_token_expires = None
+    await revoke_all_user_sessions(db, user.id)
     await db.flush()
     await db.commit()
 

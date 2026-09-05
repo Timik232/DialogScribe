@@ -139,12 +139,35 @@ class TestLogin:
 class TestRefresh:
     def test_refresh_success(self, client, mock_db):
         user = _make_user()
-        from gigaam_transcriber.auth import create_refresh_token
+        from datetime import datetime, timedelta
+
+        from gigaam_transcriber.models import RefreshSession
+
+        session = MagicMock(spec=RefreshSession)
+        session.revoked_at = None
+        session.rotated_to_hashed_jti = None
+        session.expires_at = datetime.utcnow() + timedelta(days=7)
+        session.user_id = "test-id"
+
+        from gigaam_transcriber.auth import create_refresh_token, decode_token
         rt = create_refresh_token("test-id")
-        mock_db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: user))
+        jti = decode_token(rt)["jti"]
+
+        added = []
+
+        def track_add(obj):
+            added.append(obj)
+
+        mock_db.add = MagicMock(side_effect=track_add)
+        results = [
+            MagicMock(scalar_one_or_none=lambda: session),
+            MagicMock(scalar_one_or_none=lambda: user),
+        ]
+        mock_db.execute = AsyncMock(side_effect=results)
         resp = client.post("/api/auth/refresh", cookies={"refresh_token": rt})
         assert resp.status_code == 200
         assert "access_token" in resp.json()
+        assert len(added) == 1
 
     def test_refresh_no_cookie(self, client, mock_db):
         resp = client.post("/api/auth/refresh")

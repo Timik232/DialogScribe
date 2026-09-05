@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from gigaam_transcriber.auth import get_admin_user
 from gigaam_transcriber.database import get_db
 from gigaam_transcriber.models import UsageEvent, User, UserLimit
+from gigaam_transcriber.sessions import revoke_all_user_sessions
 from gigaam_transcriber.usage import (
     get_global_stats,
     get_usage_timeseries,
@@ -204,6 +205,8 @@ async def patch_user(
 
     if body.is_active is not None:
         user.is_active = body.is_active
+        if body.is_active is False:
+            await revoke_all_user_sessions(db, user.id)
 
     await db.flush()
     return {"id": user.id, "email": user.email, "is_active": user.is_active}
