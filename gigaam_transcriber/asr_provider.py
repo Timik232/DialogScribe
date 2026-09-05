@@ -145,21 +145,31 @@ class FallbackASRProvider(ASRProviderBase):
                 logger.debug("Error closing provider %s", provider, exc_info=True)
 
 
-def _create_provider(name: ASRProvider) -> ASRProviderBase:
-    """Instantiate a concrete provider by enum value (lazy import)."""
+def _create_provider(name: ASRProvider, max_retries: int | None = None) -> ASRProviderBase:
+    """Instantiate a concrete provider by enum value (lazy import).
+
+    ``max_retries`` overrides the provider's built-in HTTP retry count; None
+    keeps the provider default (3). Live-hints passes its session policy so
+    retries have exactly one owner per request.
+    """
     if name is ASRProvider.MISTRAL:
         from .mistral_client import MistralASRClient
 
-        return MistralASRClient(
-            asr_url=os.getenv("ASR_URL", "https://api.mistral.ai"),
-            model=os.getenv("ASR_MODEL", "voxtral-mini-latest"),
-            api_key=os.getenv("MISTRAL_API_KEY", ""),
-            proxy=os.getenv("PROXY_URL"),
-            min_request_interval=float(os.getenv("ASR_MIN_INTERVAL", "1.0")),
-        )
+        kwargs: dict[str, Any] = {
+            "asr_url": os.getenv("ASR_URL", "https://api.mistral.ai"),
+            "model": os.getenv("ASR_MODEL", "voxtral-mini-latest"),
+            "api_key": os.getenv("MISTRAL_API_KEY", ""),
+            "proxy": os.getenv("PROXY_URL"),
+            "min_request_interval": float(os.getenv("ASR_MIN_INTERVAL", "1.0")),
+        }
+        if max_retries is not None:
+            kwargs["max_retries"] = max_retries
+        return MistralASRClient(**kwargs)
     if name is ASRProvider.LITELLM:
         from .litellm_client import LiteLLMASRClient
 
+        if max_retries is not None:
+            return LiteLLMASRClient(max_retries=max_retries)
         return LiteLLMASRClient()
     raise ValueError(f"Unknown ASR provider: {name!r}")
 
@@ -167,6 +177,7 @@ def _create_provider(name: ASRProvider) -> ASRProviderBase:
 def get_asr_provider(
     preference: str | None = None,
     fallback: bool = True,
+    max_retries: int | None = None,
 ) -> ASRProviderBase:
     """Factory: return an ASR provider, optionally wrapping with fallback.
 
@@ -177,6 +188,7 @@ def get_asr_provider(
             :class:`FallbackASRProvider` that retries with the other provider
             when the primary fails.  Per-request only — never mutates stored
             preference.
+        max_retries: Optional HTTP retry count forwarded to both providers.
 
     Returns:
         An :class:`ASRProviderBase` instance ready for use.
@@ -192,7 +204,7 @@ def get_asr_provider(
         logger.warning("Unknown ASR provider %r, defaulting to litellm", preference)
         primary_enum = ASRProvider.LITELLM
 
-    primary = _create_provider(primary_enum)
+    primary = _create_provider(primary_enum, max_retries)
 
     if not fallback:
         return primary
@@ -200,7 +212,7 @@ def get_asr_provider(
     secondary_enum = (
         ASRProvider.LITELLM if primary_enum is ASRProvider.MISTRAL else ASRProvider.MISTRAL
     )
-    secondary = _create_provider(secondary_enum)
+    secondary = _create_provider(secondary_enum, max_retries)
 
     return FallbackASRProvider(
         primary=primary,

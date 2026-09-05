@@ -44,8 +44,6 @@ from gigaam_transcriber.ws_protocol import (
 logger = logging.getLogger("dialogscribe-live-hints")
 router = APIRouter(prefix="/api/live-hints", tags=["live-hints"])
 
-MAX_ASR_RETRIES = 3
-
 _DROP_LOG_INTERVAL = 5.0
 
 
@@ -104,7 +102,9 @@ async def live_hints_ws(ws: WebSocket):
 
     bounds = LiveHintsBounds.from_env()
     audio_adapter = AudioAdapter(provider_preference=provider_preference)
-    llm_client = LLMClient(LLMClientConfig())
+    llm_client = LLMClient(
+        LLMClientConfig(max_retries=max(0, bounds.llm_attempts - 1))
+    )
 
     # ── Live Advisor Agent components ──────────────────────────
     event_detector = EventDetector()
@@ -121,6 +121,10 @@ async def live_hints_ws(ws: WebSocket):
     recv_queue: asyncio.Queue = asyncio.Queue(maxsize=bounds.recv_queue)
     process_queue: asyncio.Queue = asyncio.Queue(maxsize=bounds.process_queue)
 
+    def _invalid_count() -> int:
+        value = getattr(audio_adapter, "invalid_chunks", 0)
+        return value if isinstance(value, int) else 0
+
     def _status_payload() -> dict:
         caps = accumulator.caps.as_dict() if accumulator.caps else {}
         caps.update(
@@ -131,7 +135,7 @@ async def live_hints_ws(ws: WebSocket):
         return {
             "queues": {"recv": recv_queue.qsize(), "process": process_queue.qsize()},
             "dropped": stats.dropped_chunks,
-            "invalid_chunks": getattr(audio_adapter, "invalid_chunks", 0),
+            "invalid_chunks": _invalid_count(),
             "accumulators": {
                 **accumulator.sizes(),
                 "segments": len(transcript_segments),
@@ -215,47 +219,31 @@ async def live_hints_ws(ws: WebSocket):
         prefix = "[Вы]:" if speaker == "user" else "[Оппонент]:"
 
         _asr_start = time.time()
-        text: str | None = None
-        skip_chunk = False
-
-        for attempt in range(MAX_ASR_RETRIES):
-            try:
-                text = await audio_adapter.process_chunk_bytes(audio, source)
-                break
-            except ASRError as e:
-                if attempt < MAX_ASR_RETRIES - 1:
-                    delay = 1 * (2 ** attempt)
-                    logger.warning(
-                        "ASR retry %d/%d in %.1fs: %s",
-                        attempt + 1, MAX_ASR_RETRIES, delay, e,
-                    )
-                    await asyncio.sleep(delay)
-                else:
-                    logger.warning(
-                        "ASR failed after %d attempts: %s",
-                        MAX_ASR_RETRIES, e,
-                    )
-                    await channel.send(
-                        ErrorMessage(code="asr", message="Ошибка распознавания речи").model_dump()
-                    )
-                    skip_chunk = True
-            except AudioProcessingError as e:
-                logger.warning("Audio processing error: %s", e)
-                await channel.send(
-                    ErrorMessage(code="asr", message="Ошибка обработки аудио").model_dump()
-                )
-                skip_chunk = True
-                break
+        invalid_before = _invalid_count()
+        try:
+            text = await audio_adapter.process_chunk_bytes(audio, source)
+        except ASRError as e:
+            logger.warning("ASR failed after provider retries: %s", e)
+            await channel.send(
+                ErrorMessage(code="asr", message="Ошибка распознавания речи").model_dump()
+            )
+            stats.chunks_processed += 1
+            return
+        except AudioProcessingError as e:
+            logger.warning("Audio processing error: %s", e)
+            await channel.send(
+                ErrorMessage(code="asr", message="Ошибка обработки аудио").model_dump()
+            )
+            stats.chunks_processed += 1
+            return
 
         logger.info("ASR processing time: %.2fs for source=%s", time.time() - _asr_start, source)
         stats.chunks_processed += 1
 
-        if skip_chunk:
-            return
-
         if not text or not text.strip():
+            status = "invalid_chunk" if _invalid_count() > invalid_before else "silent_chunk"
             await channel.send(
-                StatusMessage(status="silent_chunk").model_dump()
+                StatusMessage(status=status, **_status_payload()).model_dump()
             )
             return
 

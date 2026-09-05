@@ -23,11 +23,12 @@ _MAX_RETRIES = 3
 
 
 class LiteLLMASRClient(ASRProviderBase):
-    def __init__(self) -> None:
+    def __init__(self, max_retries: int | None = None) -> None:
         self._base_url = os.getenv("LITELLM_URL", _DEFAULT_URL).rstrip("/")
         self._model = os.getenv("LITELLM_MODEL", _DEFAULT_MODEL)
         self._api_key = os.getenv("LITELLM_API_KEY", os.getenv("LLM_API_KEY", ""))
         self._client = httpx.AsyncClient(timeout=300.0)
+        self._max_retries = _MAX_RETRIES if max_retries is None else max(0, int(max_retries))
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -43,30 +44,31 @@ class LiteLLMASRClient(ASRProviderBase):
 
         url = f"{self._base_url}/v1/audio/transcriptions"
 
-        for attempt in range(_MAX_RETRIES + 1):
+        max_retries = self._max_retries
+        for attempt in range(max_retries + 1):
             try:
                 response = await self._client.post(
                     url, headers=headers, files=files, data=data,
                 )
                 response.raise_for_status()
             except httpx.TimeoutException as exc:
-                if attempt == _MAX_RETRIES:
+                if attempt == max_retries:
                     raise ASRError(
-                        f"LiteLLM ASR timeout after {_MAX_RETRIES} retries", cause=exc,
+                        f"LiteLLM ASR timeout after {max_retries} retries", cause=exc,
                     ) from exc
                 backoff = min(1.0 * (2.0 ** attempt), 10.0)
                 logger.warning(
                     "LiteLLM timeout (attempt %d/%d), retry in %.1fs",
-                    attempt + 1, _MAX_RETRIES, backoff,
+                    attempt + 1, max_retries, backoff,
                 )
                 await asyncio.sleep(backoff)
                 continue
             except httpx.HTTPStatusError as exc:
-                if exc.response.status_code in (429, 503) and attempt < _MAX_RETRIES:
+                if exc.response.status_code in (429, 503) and attempt < max_retries:
                     backoff = min(1.0 * (2.0 ** attempt), 10.0)
                     logger.warning(
                         "LiteLLM status %d (attempt %d/%d), retry in %.1fs",
-                        exc.response.status_code, attempt + 1, _MAX_RETRIES, backoff,
+                        exc.response.status_code, attempt + 1, max_retries, backoff,
                     )
                     await asyncio.sleep(backoff)
                     continue
@@ -75,14 +77,14 @@ class LiteLLMASRClient(ASRProviderBase):
                     cause=exc,
                 ) from exc
             except httpx.RequestError as exc:
-                if attempt == _MAX_RETRIES:
+                if attempt == max_retries:
                     raise ASRError(
-                        f"LiteLLM request error after {_MAX_RETRIES} retries", cause=exc,
+                        f"LiteLLM request error after {max_retries} retries", cause=exc,
                     ) from exc
                 backoff = min(1.0 * (2.0 ** attempt), 10.0)
                 logger.warning(
                     "LiteLLM request error (attempt %d/%d), retry in %.1fs: %s",
-                    attempt + 1, _MAX_RETRIES, backoff, exc,
+                    attempt + 1, max_retries, backoff, exc,
                 )
                 await asyncio.sleep(backoff)
                 continue

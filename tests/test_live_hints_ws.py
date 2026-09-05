@@ -176,7 +176,8 @@ class TestLiveHintsWsProtocol:
                 expect_close(ws, 4413)
         app.state.adapter.process_chunk_bytes.assert_not_called()
 
-    def test_asr_error_retries_then_error_message(self, ws_env, monkeypatch):
+    def test_asr_error_single_attempt_error_message(self, ws_env, monkeypatch):
+        """Task 10: retry has one owner (the provider); the router calls ASR once."""
         from gigaam_transcriber.exceptions import ASRError
 
         adapter = MagicMock(name="audio_adapter")
@@ -218,4 +219,4 @@ class TestLiveHintsWsProtocol:
                 ws.send_bytes(b"\x01" + b"noise")
                 err = ws.receive_json()
                 assert err["type"] == "error" and err["code"] == "asr"
-        assert adapter.process_chunk_bytes.await_count == 3
+        assert adapter.process_chunk_bytes.await_count == 1

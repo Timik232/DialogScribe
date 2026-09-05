@@ -6,12 +6,15 @@ argumentative and navigational hints during live transcription.
 
 import asyncio
 import base64
+import io
 import json
 import logging
 import os
 import re
 import subprocess
 import tempfile
+import time
+import wave
 from dataclasses import dataclass
 from typing import Optional
 
@@ -183,10 +186,22 @@ HINT_TEMPLATES: dict[str, dict[str, str]] = {
 # --- Placeholder Classes & Functions ---
 
 class AudioAdapter:
-    """Per-session audio processing adapter: WebM → ASR transcription."""
+    """Per-session audio processing adapter: WebM → ASR transcription.
+
+    The ASR provider chain is constructed with the session retry policy
+    (``LIVE_HINTS_ASR_ATTEMPTS``, default 2 total attempts) so retries have
+    exactly ONE owner — the provider client. The adapter itself never retries.
+    """
 
     def __init__(self, provider_preference: str | None = None) -> None:
-        self._asr_client = get_asr_provider(preference=provider_preference)
+        attempts = _env_int("LIVE_HINTS_ASR_ATTEMPTS", 2)
+        self.max_chunk_seconds = _env_float("LIVE_HINTS_MAX_CHUNK_SECONDS", 30.0)
+        self.invalid_chunks = 0
+        self._last_invalid_log = 0.0
+        self._asr_client = get_asr_provider(
+            preference=provider_preference,
+            max_retries=max(0, attempts - 1),
+        )
 
     async def process_chunk(self, audio_b64: str, source: str) -> str:
         """Decode base64 WebM audio and delegate to :meth:`process_chunk_bytes`."""
@@ -216,6 +231,20 @@ class AudioAdapter:
             wav_bytes = await asyncio.to_thread(self._decode_to_wav, raw_bytes)
             if wav_bytes is None:
                 return ""
+            verdict = self._check_wav(wav_bytes)
+            if verdict == "invalid":
+                self.invalid_chunks += 1
+                now = time.monotonic()
+                if now - self._last_invalid_log >= 5.0:
+                    self._last_invalid_log = now
+                    logger.warning(
+                        "live-hints chunk rejected: duration/size sanity failed "
+                        "(bytes=%d, cap=%.0fs), total invalid=%d",
+                        len(wav_bytes), self.max_chunk_seconds, self.invalid_chunks,
+                    )
+                return ""
+            if verdict == "silent":
+                return ""
             transcription = await self._asr_client.transcribe_raw(
                 wav_bytes, "audio.wav"
             )
@@ -226,6 +255,27 @@ class AudioAdapter:
             raise ASRError(
                 f"Transcription failed for source '{source}'", cause=exc
             ) from exc
+
+    def _check_wav(self, wav_bytes: bytes) -> str:
+        """Sanity-check decoded WAV bytes: "ok", "silent" (no frames) or "invalid".
+
+        Rejects absurd durations, oversized payloads and non-audio garbage
+        without raising, so a bad chunk never crashes the processor.
+        """
+        max_bytes = int(self.max_chunk_seconds * 32000 * 2) + 4096
+        if not wav_bytes or len(wav_bytes) > max_bytes:
+            return "invalid"
+        try:
+            with wave.open(io.BytesIO(wav_bytes)) as w:
+                frames = w.getnframes()
+                rate = w.getframerate()
+        except Exception:
+            return "invalid"
+        if rate <= 0 or frames / rate > self.max_chunk_seconds:
+            return "invalid"
+        if frames == 0:
+            return "silent"
+        return "ok"
 
     def _decode_to_wav(self, raw_bytes: bytes) -> bytes | None:
         """Sync worker-thread body: ffmpeg WebM → WAV bytes.

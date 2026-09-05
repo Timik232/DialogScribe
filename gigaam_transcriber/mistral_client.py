@@ -47,6 +47,7 @@ class MistralASRClient(ASRProviderBase):
         api_key: str = "",
         proxy: Optional[str] = None,
         min_request_interval: float = 1.0,
+        max_retries: int = 3,
     ) -> None:
         self.asr_url = asr_url.rstrip("/")
         self.model = model
@@ -56,6 +57,7 @@ class MistralASRClient(ASRProviderBase):
             client_kwargs["proxy"] = proxy
         self._client = httpx.Client(**client_kwargs)
         self._min_request_interval = min_request_interval
+        self._max_retries = max(0, int(max_retries))
         self._last_request_time: float = 0.0  # time.monotonic() timestamp
         self._rate_limit_lock = threading.Lock()
 
@@ -128,7 +130,7 @@ class MistralASRClient(ASRProviderBase):
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
 
-        max_retries = 3
+        max_retries = self._max_retries
         for attempt in range(max_retries + 1):
             try:
                 response = self._client.post(url, headers=headers, files=files, data=data)
@@ -260,7 +262,7 @@ class MistralASRClient(ASRProviderBase):
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
 
-        max_retries = 3
+        max_retries = self._max_retries
         for attempt in range(max_retries + 1):
             try:
                 response = self._client.post(url, headers=headers, files=files, data=data)

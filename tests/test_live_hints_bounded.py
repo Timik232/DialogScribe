@@ -293,7 +293,189 @@ class TestAccumulatorCaps:
         assert acc.get_hint_history(0) == []
 
 
-class TestAudioAdapterOffLoop:
+class TestRetrySingleOwner:
+    def test_adapter_passes_policy_to_provider_no_outer_retry(self, monkeypatch):
+        captured: dict = {}
+        calls: list[int] = []
+
+        async def failing_transcribe(audio, filename, language=None):
+            calls.append(1)
+            raise live_hints_service.ASRError("boom")
+
+        provider = MagicMock()
+        provider.transcribe_raw = AsyncMock(side_effect=failing_transcribe)
+
+        def fake_factory(preference=None, fallback=True, max_retries=None):
+            captured["max_retries"] = max_retries
+            return provider
+
+        monkeypatch.setattr(live_hints_service, "get_asr_provider", fake_factory)
+        monkeypatch.setenv("LIVE_HINTS_ASR_ATTEMPTS", "2")
+
+        import io as _io
+
+        buf = _io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(b"\x00\x00" * 160)
+        monkeypatch.setattr(
+            live_hints_service.AudioAdapter, "_decode_to_wav", lambda self, raw: buf.getvalue()
+        )
+
+        adapter = live_hints_service.AudioAdapter()
+
+        async def run():
+            await adapter.process_chunk_bytes(b"ab", "mic")
+
+        with pytest.raises(live_hints_service.ASRError):
+            asyncio.run(run())
+
+        assert captured["max_retries"] == 1
+        assert len(calls) == 1
+
+    def test_provider_retries_exactly_configured_attempts(self, monkeypatch):
+        import httpx
+
+        from gigaam_transcriber.litellm_client import LiteLLMASRClient
+
+        client = LiteLLMASRClient(max_retries=1)
+        post = AsyncMock(
+            side_effect=[
+                httpx.TimeoutException("timeout"),
+                SimpleNamespace(
+                    raise_for_status=lambda: None,
+                    json=lambda: {"text": "ок"},
+                ),
+            ]
+        )
+        monkeypatch.setattr(client._client, "post", post)
+
+        async def run():
+            return await client.transcribe_raw(b"audio", "a.wav")
+
+        assert asyncio.run(run()) == "ок"
+        assert post.await_count == 2
+
+    def test_provider_default_retries_unchanged_for_other_consumers(self):
+        from gigaam_transcriber.litellm_client import LiteLLMASRClient
+        from gigaam_transcriber.mistral_client import MistralASRClient
+
+        assert LiteLLMASRClient()._max_retries == 3
+        assert MistralASRClient()._max_retries == 3
+
+    def test_factory_forwards_max_retries(self):
+        from gigaam_transcriber.asr_provider import get_asr_provider
+        from gigaam_transcriber.litellm_client import LiteLLMASRClient
+
+        provider = get_asr_provider("litellm", fallback=False, max_retries=0)
+        assert isinstance(provider, LiteLLMASRClient)
+        assert provider._max_retries == 0
+
+
+class TestChunkValidation:
+    def make_wav(self, frames: int, rate: int = 16000) -> bytes:
+        import io as _io
+
+        buf = _io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(b"\x00\x00" * frames)
+        return buf.getvalue()
+
+    def adapter_with(self, monkeypatch, max_chunk_seconds: str):
+        monkeypatch.setenv("LIVE_HINTS_MAX_CHUNK_SECONDS", max_chunk_seconds)
+        provider = MagicMock()
+        provider.transcribe_raw = AsyncMock(return_value="текст")
+        monkeypatch.setattr(live_hints_service, "get_asr_provider", MagicMock(return_value=provider))
+        adapter = live_hints_service.AudioAdapter()
+        return adapter, provider
+
+    def run_chunk(self, adapter, wav: bytes) -> str:
+        def fake_run(args, **kwargs):
+            dst = args[-1]
+            with open(dst, "wb") as f:
+                f.write(wav)
+            return SimpleNamespace(returncode=0, stderr=b"")
+
+        import unittest.mock
+
+        adapter_module_patch = unittest.mock.patch.object(
+            live_hints_service.subprocess, "run", fake_run
+        )
+
+        async def go():
+            with adapter_module_patch:
+                return await adapter.process_chunk_bytes(b"webm", "mic")
+
+        return asyncio.run(go())
+
+    def test_oversize_duration_rejected_and_counted(self, monkeypatch):
+        monkeypatch.setenv("LIVE_HINTS_MAX_CHUNK_SECONDS", "0.01")
+        adapter, provider = self.adapter_with(monkeypatch, "0.01")
+        wav = self.make_wav(frames=1600)  # 1600 frames @ 16 kHz = 0.1 s
+
+        assert self.run_chunk(adapter, wav) == ""
+        assert adapter.invalid_chunks == 1
+        provider.transcribe_raw.assert_not_awaited()
+
+    def test_reasonable_chunk_accepted(self, monkeypatch):
+        monkeypatch.setenv("LIVE_HINTS_MAX_CHUNK_SECONDS", "30")
+        adapter, provider = self.adapter_with(monkeypatch, "30")
+        wav = self.make_wav(frames=1600)
+
+        assert self.run_chunk(adapter, wav) == "текст"
+        assert adapter.invalid_chunks == 0
+        provider.transcribe_raw.assert_awaited_once()
+
+    def test_zero_frames_treated_as_silent_not_invalid(self, monkeypatch):
+        monkeypatch.setenv("LIVE_HINTS_MAX_CHUNK_SECONDS", "30")
+        adapter, provider = self.adapter_with(monkeypatch, "30")
+        wav = self.make_wav(frames=0)
+
+        assert self.run_chunk(adapter, wav) == ""
+        assert adapter.invalid_chunks == 0
+        provider.transcribe_raw.assert_not_awaited()
+
+    def test_garbage_wav_rejected_not_raised(self, monkeypatch):
+        monkeypatch.setenv("LIVE_HINTS_MAX_CHUNK_SECONDS", "30")
+        adapter, provider = self.adapter_with(monkeypatch, "30")
+
+        assert self.run_chunk(adapter, b"not a wav at all") == ""
+        assert adapter.invalid_chunks == 1
+        provider.transcribe_raw.assert_not_awaited()
+
+    def test_status_distinguishes_invalid_from_silent(self, monkeypatch, patched_deps):
+        monkeypatch.setenv("LIVE_HINTS_MAX_CHUNK_SECONDS", "0.001")
+
+        adapter = MagicMock(name="audio_adapter")
+        adapter.invalid_chunks = 0
+        adapter.close = AsyncMock()
+
+        async def fake_process(audio: bytes, source: str) -> str:
+            adapter.invalid_chunks += 1
+            return ""
+
+        adapter.process_chunk_bytes = AsyncMock(side_effect=fake_process)
+        monkeypatch.setattr(live_hints_router, "AudioAdapter", MagicMock(return_value=adapter))
+
+        incoming = [auth_msg(), audio_msg(b"garbage")]
+
+        def got_invalid_status() -> bool:
+            return any('"invalid_chunk"' in s_ for s_ in fake.sent)
+
+        fake = FakeWebSocket(incoming, stop_until=got_invalid_status)
+        asyncio.run(live_hints_router.live_hints_ws(fake))
+
+        msgs = sent_json(fake)
+        invalid = [m for m in msgs if m["type"] == "status" and m["status"] == "invalid_chunk"]
+        assert invalid and invalid[0]["invalid_chunks"] >= 1
+
+
+
     def test_ffmpeg_runs_in_worker_thread(self, monkeypatch, tmp_path):
         import os as _os
 
