@@ -289,7 +289,7 @@ def _generate_mindmap_map_reduce(text: str, llm_client: LLMClient, budget: dict,
         try:
             return llm_client.call(MINDMAP_REDUCE_PROMPT, combined, max_tokens=4096, model_override=model)
         except Exception as e:
-            logger.error("Reduce step failed for mindmap: %s", e)
+            logger.error("Reduce step failed for mindmap: %s", type(e).__name__, exc_info=True)
             return subtrees[0]
 
     logger.info(
@@ -315,7 +315,7 @@ def _generate_mindmap_map_reduce(text: str, llm_client: LLMClient, budget: dict,
             sub_result = llm_client.call(MINDMAP_REDUCE_PROMPT, group_combined, max_tokens=4096, model_override=model)
             sub_results.append(sub_result)
         except Exception as e:
-            logger.warning("Sub-group reduce failed: %s", e)
+            logger.warning("Sub-group reduce failed: %s", type(e).__name__, exc_info=True)
             sub_results.append(group[0])
 
     if not sub_results:
@@ -329,7 +329,7 @@ def _generate_mindmap_map_reduce(text: str, llm_client: LLMClient, budget: dict,
         try:
             return llm_client.call(MINDMAP_REDUCE_PROMPT, final_combined, max_tokens=4096, model_override=model)
         except Exception as e:
-            logger.error("Final reduce failed for mindmap: %s", e)
+            logger.error("Final reduce failed for mindmap: %s", type(e).__name__, exc_info=True)
             return sub_results[0]
 
     raise ValueError(

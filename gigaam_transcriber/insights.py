@@ -177,7 +177,7 @@ def extract_action_items(text: str, llm_client: LLMClient, model: Optional[str] 
     try:
         raw = llm_client.call(ACTION_ITEMS_SYSTEM_PROMPT, text, model_override=model)
     except Exception as e:
-        logger.error("LLM call failed for action items: %s", e)
+        logger.error("LLM call failed for action items: %s", type(e).__name__, exc_info=True)
         raise
 
     return _validate_action_items(raw)
@@ -216,7 +216,7 @@ def _extract_action_items_map_reduce(text: str, llm_client: LLMClient, budget: d
         try:
             reduced = llm_client.call(ACTION_ITEMS_REDUCE_PROMPT, combined, model_override=model)
         except Exception as e:
-            logger.error("Reduce step failed for action items: %s", e)
+            logger.error("Reduce step failed for action items: %s", type(e).__name__, exc_info=True)
             return _validate_action_items(all_raw_items[0])
         return _validate_action_items(reduced)
 
@@ -243,7 +243,7 @@ def _extract_action_items_map_reduce(text: str, llm_client: LLMClient, budget: d
             sub_result = llm_client.call(ACTION_ITEMS_REDUCE_PROMPT, group_combined, model_override=model)
             sub_results.append(sub_result)
         except Exception as e:
-            logger.warning("Sub-group reduce failed: %s", e)
+            logger.warning("Sub-group reduce failed: %s", type(e).__name__, exc_info=True)
             sub_results.append(group[0])
 
     if not sub_results:
@@ -257,7 +257,7 @@ def _extract_action_items_map_reduce(text: str, llm_client: LLMClient, budget: d
         try:
             reduced = llm_client.call(ACTION_ITEMS_REDUCE_PROMPT, final_combined, model_override=model)
         except Exception as e:
-            logger.error("Final reduce failed for action items: %s", e)
+            logger.error("Final reduce failed for action items: %s", type(e).__name__, exc_info=True)
             return _validate_action_items(sub_results[0])
         return _validate_action_items(reduced)
 
@@ -322,7 +322,7 @@ def generate_suggested_steps(text: str, llm_client: LLMClient, model: Optional[s
     try:
         raw = llm_client.call(SUGGESTED_STEPS_SYSTEM_PROMPT, text, model_override=model)
     except Exception as e:
-        logger.error("LLM call failed for suggested steps: %s", e)
+        logger.error("LLM call failed for suggested steps: %s", type(e).__name__, exc_info=True)
         raise
 
     return _validate_suggested_steps(raw)
@@ -361,7 +361,7 @@ def _generate_steps_map_reduce(text: str, llm_client: LLMClient, budget: dict, m
         try:
             reduced = llm_client.call(SUGGESTED_STEPS_REDUCE_PROMPT, combined, model_override=model)
         except Exception as e:
-            logger.error("Reduce step failed for suggested steps: %s", e)
+            logger.error("Reduce step failed for suggested steps: %s", type(e).__name__, exc_info=True)
             return _validate_suggested_steps(all_raw_steps[0])
         return _validate_suggested_steps(reduced)
 
@@ -388,7 +388,7 @@ def _generate_steps_map_reduce(text: str, llm_client: LLMClient, budget: dict, m
             sub_result = llm_client.call(SUGGESTED_STEPS_REDUCE_PROMPT, group_combined, model_override=model)
             sub_results.append(sub_result)
         except Exception as e:
-            logger.warning("Sub-group reduce failed: %s", e)
+            logger.warning("Sub-group reduce failed: %s", type(e).__name__, exc_info=True)
             sub_results.append(group[0])
 
     if not sub_results:
@@ -402,7 +402,7 @@ def _generate_steps_map_reduce(text: str, llm_client: LLMClient, budget: dict, m
         try:
             reduced = llm_client.call(SUGGESTED_STEPS_REDUCE_PROMPT, final_combined, model_override=model)
         except Exception as e:
-            logger.error("Final reduce failed for suggested steps: %s", e)
+            logger.error("Final reduce failed for suggested steps: %s", type(e).__name__, exc_info=True)
             return _validate_suggested_steps(sub_results[0])
         return _validate_suggested_steps(reduced)
 
