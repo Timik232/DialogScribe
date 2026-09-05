@@ -297,11 +297,11 @@
       "severity": "Medium",
       "affected_artifact": "gigaam_transcriber/live_hints_service.py",
       "description": "Synchronous subprocess blocks live-hints async path",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 10 / Release B",
-      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-10-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-10-verification.txt",
+      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && python -m pytest tests/test_live_hints_bounded.py tests/test_live_hints_ws.py -q -p no:cacheprovider",
+      "evidence_path": ".sisyphus/evidence/task-10-saturation.txt, .sisyphus/evidence/task-10-live-hints.png",
       "expiry": ""
     },
     {
@@ -311,11 +311,11 @@
       "severity": "Medium",
       "affected_artifact": "live-hints route/service",
       "description": "Live-hints backpressure flag is ineffective because receive/process share one coroutine",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 10 / Release B",
-      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-10-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-10-verification.txt",
+      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && python -m pytest tests/test_live_hints_bounded.py tests/test_live_hints_ws.py -q -p no:cacheprovider",
+      "evidence_path": ".sisyphus/evidence/task-10-saturation.txt, .sisyphus/evidence/task-10-live-hints.png",
       "expiry": ""
     },
     {
