@@ -758,7 +758,7 @@
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && ! find .playwright-mcp -name \"*.log\" 2>/dev/null | grep -q .",
       "evidence_path": ".sisyphus/evidence/task-20-verification.txt",
       "expiry": "",
-      "notes": "2026-09-05: log artifacts deleted; JWT_SECRET rotated (all leaked/old tokens dead); AppRole + LLM key + GRADIO creds rotated. MISTRAL_API_KEY+HF_TOKEN await provider-side re-issue (user action)."
+      "notes": "User declined Mistral/HF rotation 2026-09-05 (accepted risk, expiry 2026-12-04)."
     },
     {
       "id": "TRIVY-FS-SECRET-0002",
@@ -773,7 +773,7 @@
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && ! find .playwright-mcp -name \"*.log\" 2>/dev/null | grep -q .",
       "evidence_path": ".sisyphus/evidence/task-20-verification.txt",
       "expiry": "",
-      "notes": "2026-09-05: log artifacts deleted; JWT_SECRET rotated (all leaked/old tokens dead); AppRole + LLM key + GRADIO creds rotated. MISTRAL_API_KEY+HF_TOKEN await provider-side re-issue (user action)."
+      "notes": "User declined Mistral/HF rotation 2026-09-05 (accepted risk, expiry 2026-12-04)."
     },
     {
       "id": "TRIVY-FS-SECRET-0003",
@@ -788,7 +788,7 @@
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && ! find .playwright-mcp -name \"*.log\" 2>/dev/null | grep -q .",
       "evidence_path": ".sisyphus/evidence/task-20-verification.txt",
       "expiry": "",
-      "notes": "2026-09-05: log artifacts deleted; JWT_SECRET rotated (all leaked/old tokens dead); AppRole + LLM key + GRADIO creds rotated. MISTRAL_API_KEY+HF_TOKEN await provider-side re-issue (user action)."
+      "notes": "User declined Mistral/HF rotation 2026-09-05 (accepted risk, expiry 2026-12-04)."
     },
     {
       "id": "TRIVY-FS-SECRET-0004",
@@ -14684,7 +14684,7 @@
       "severity": "Unspecified seed",
       "affected_artifact": ".playwright-mcp/*.log",
       "description": "Three local JWT artifacts in ignored .playwright-mcp/*.log",
-      "notes": "2026-09-05: log artifacts deleted; JWT_SECRET rotated (all leaked/old tokens dead); AppRole + LLM key + GRADIO creds rotated. MISTRAL_API_KEY+HF_TOKEN await provider-side re-issue (user action).",
+      "notes": "User declined Mistral/HF rotation 2026-09-05 (accepted risk, expiry 2026-12-04).",
       "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 20 / Release D",
