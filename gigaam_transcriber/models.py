@@ -115,7 +115,7 @@ class SavedTranscription(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     full_text: Mapped[str] = mapped_column(Text, nullable=False)
     analysis_text: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
-    segments_json: Mapped[dict] = mapped_column("segments_json", JSON, nullable=True, default=dict)
+    segments_json: Mapped[list] = mapped_column("segments_json", JSON, nullable=True, default=list)
     speaker_names: Mapped[dict] = mapped_column("speaker_names", JSON, nullable=True, default=dict)
     duration: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     language: Mapped[str] = mapped_column(String(10), nullable=False, default="ru")
@@ -149,7 +149,9 @@ class UserSettings(Base):
     __tablename__ = "user_settings"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    user_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False, index=True
+    )
     asr_provider: Mapped[str] = mapped_column(
         String(100),
         nullable=False,

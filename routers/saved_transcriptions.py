@@ -69,6 +69,35 @@ def _ensure_llm() -> None:
         raise HTTPException(status_code=503, detail="LLM_API_KEY not configured")
 
 
+# ── Segments schema normalization ───────────────────────────────────
+
+
+def _normalize_segments(value: Any) -> list[Any]:
+    """Normalize a stored/legacy segments payload to the canonical list schema.
+
+    Legacy rows may hold dict shapes (empty {}, index-keyed {"0": ...}, or
+    {"segments": [...]}); every read path funnels through this helper so
+    clients always receive a list, with no data loss. The write path stores
+    the canonical list only.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, Mapping):
+        if not value:
+            return []
+        inner = value.get("segments") if "segments" in value else None
+        if isinstance(inner, list):
+            return inner
+        if all(str(k).isdigit() for k in value):
+            return [value[k] for k in sorted(value, key=int)]
+        return [dict(value)]
+    if isinstance(value, Sequence):
+        return list(value)
+    return [value]
+
+
 # ── Pydantic schemas ────────────────────────────────────────────────
 
 class SaveRequest(BaseModel):
@@ -148,7 +177,7 @@ def _to_dict(t: SavedTranscription) -> dict[str, Any]:
         "title": t.title,
         "full_text": t.full_text,
         "analysis_text": t.analysis_text,
-        "segments_json": t.segments_json,
+        "segments_json": _normalize_segments(t.segments_json),
         "speaker_names": t.speaker_names,
         "duration": t.duration,
         "language": t.language,
@@ -203,7 +232,7 @@ async def create_transcription(
         user_id=_user.id,
         title=title,
         full_text=body.full_text,
-        segments_json=body.segments or {},
+        segments_json=_normalize_segments(body.segments),
         speaker_names=body.speaker_names or {},
         duration=body.duration,
         language=body.language,
@@ -532,7 +561,7 @@ async def get_shared_transcription(
         title=obj.title,
         full_text=obj.full_text,
         analysis_text=obj.analysis_text,
-        segments_json=obj.segments_json,
+        segments_json=_normalize_segments(obj.segments_json),
         speaker_names=obj.speaker_names,
         duration=obj.duration,
         language=obj.language,
