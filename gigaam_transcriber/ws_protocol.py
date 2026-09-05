@@ -383,11 +383,13 @@ class BinaryUpload:
         channel: OutboundChannel | None = None,
         limits: WsLimits | None = None,
         tmp_dir: str | None = None,
+        suffix: str = ".upload",
     ) -> None:
         self._ws = ws
         self._channel = channel
         self._limits = limits or WsLimits.from_env()
         self._tmp_dir = tmp_dir
+        self.suffix = suffix
         self.path: str | None = None
         self.meta: dict[str, Any] | None = None
         self.declared_bytes = 0
@@ -442,7 +444,7 @@ class BinaryUpload:
         """
         fh = tempfile.NamedTemporaryFile(
             prefix="ds_ws_",
-            suffix=".upload",
+            suffix=self.suffix,
             delete=False,
             dir=self._tmp_dir,
             mode="wb",

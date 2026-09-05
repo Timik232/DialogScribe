@@ -1,15 +1,19 @@
-import asyncio
-import base64
 import logging
 import os
-import tempfile
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from gigaam_transcriber.autoflow import run_autoflow
-from gigaam_transcriber.summarizer import LLMClient, LLMClientConfig
-from gigaam_transcriber.auth import decode_token
 from gigaam_transcriber.database import async_session_factory
+from gigaam_transcriber.summarizer import LLMClient, LLMClientConfig
+from gigaam_transcriber.ws_protocol import (
+    WS_PROTOCOL_VERSION,
+    BinaryUpload,
+    OutboundChannel,
+    authenticate_websocket,
+    close_ws,
+    ws_db_session,
+)
 from routers._helpers import SUPPORTED_EXTENSIONS, _map_diarization
 
 logger = logging.getLogger("dialogscribe-autoflow")
@@ -23,53 +27,44 @@ def _get_ext(filename: str) -> str:
 
 @router.websocket("/ws")
 async def autoflow_ws(ws: WebSocket):
-    await ws.accept()
-
-    # JWT auth: check for token in query params or first message
-    token = ws.query_params.get("token")
-    if not token:
-        await ws.send_json({"stage": "error", "message": "Не авторизован"})
-        await ws.close(code=4001)
+    async with ws_db_session() as db:
+        identity = await authenticate_websocket(ws, db)
+    if identity is None:
         return
 
+    channel = OutboundChannel(ws)
+    await channel.start()
+    await channel.send({"type": "auth_ok", "protocol": WS_PROTOCOL_VERSION})
+
+    upload: BinaryUpload | None = None
     try:
-        payload = decode_token(token)
-        if payload.get("type") != "access":
-            raise ValueError("Invalid token type")
-    except Exception:
-        await ws.send_json({"stage": "error", "message": "Не авторизован"})
-        await ws.close(code=4001)
-        return
-
-    tmp_path: str | None = None
-
-    try:
-        raw = await ws.receive_json()
-        file_b64 = raw.get("file_data", "")
-        filename = raw.get("filename", "audio.wav")
-        template_key = raw.get("template_key", "meeting")
-        diarization_mode = raw.get("diarization_mode", "none")
-        include_summary = raw.get("include_summary", True)
-        include_mindmap = raw.get("include_mindmap", True)
-        include_insights = raw.get("include_insights", False)
-        model = raw.get("model", "")
-        denoise = raw.get("denoise", "none")
-
-        if not file_b64:
-            await ws.send_json({"stage": "error", "message": "Файл не предоставлен"})
-            await ws.close()
+        upload = BinaryUpload(ws, channel=channel)
+        meta = await upload.receive_meta()
+        if meta is None:
             return
 
+        filename = str(meta.get("filename") or "audio.wav")
         ext = _get_ext(filename)
         if ext not in SUPPORTED_EXTENSIONS:
-            await ws.send_json({"stage": "error", "message": f"Неподдерживаемый формат: {ext}"})
-            await ws.close()
+            await channel.close_terminal(
+                {"type": "error", "stage": "error", "message": f"Неподдерживаемый формат: {ext}"}
+            )
             return
 
-        file_bytes = base64.b64decode(file_b64)
-        fd, tmp_path = tempfile.mkstemp(suffix=ext)
-        with os.fdopen(fd, "wb") as f:
-            f.write(file_bytes)
+        upload.suffix = ext  # downstream stage pipeline sniffs the container by extension
+        if not await upload.receive_binary():
+            return
+
+        channel.emit({"type": "status", "stage": "upload_complete", "progress": 0.02,
+                      "message": "Загрузка файла завершена"})
+
+        template_key = str(meta.get("template_key") or "meeting")
+        diarization_mode = meta.get("diarization_mode", "none")
+        include_summary = bool(meta.get("include_summary", True))
+        include_mindmap = bool(meta.get("include_mindmap", True))
+        include_insights = bool(meta.get("include_insights", False))
+        model = str(meta.get("model") or "")
+        denoise = meta.get("denoise", "none")
 
         llm_config = LLMClientConfig()
         if model:
@@ -77,7 +72,6 @@ async def autoflow_ws(ws: WebSocket):
         llm_client = LLMClient(llm_config)
 
         transcriber = ws.app.state.transcriber
-        user_id: str = payload.get("sub", "")
 
         config = {
             "diarization": _map_diarization(diarization_mode),
@@ -96,24 +90,22 @@ async def autoflow_ws(ws: WebSocket):
                 stage = "insights"
             elif "майндмэп" in message.lower() or "Готово" in message:
                 stage = "mindmap"
-
-            asyncio.get_event_loop().create_task(
-                ws.send_json({
-                    "stage": stage,
-                    "progress": progress,
-                    "message": message,
-                })
-            )
+            channel.emit({
+                "type": "progress",
+                "stage": stage,
+                "progress": progress,
+                "message": message,
+            })
 
         async with async_session_factory() as db:
             result = await run_autoflow(
-                file_path=tmp_path,
+                file_path=upload.path,
                 template_key=template_key,
                 llm_client=llm_client,
                 config=config,
                 transcriber=transcriber,
                 db=db,
-                user_id=user_id,
+                user_id=identity.user_id,
                 progress_callback=progress_callback,
                 include_insights=include_insights,
             )
@@ -153,23 +145,22 @@ async def autoflow_ws(ws: WebSocket):
         if result.suggested_steps:
             response_data["suggested_steps"] = result.suggested_steps
 
-        await ws.send_json({"stage": "complete", "result": response_data})
+        await channel.close_terminal({"type": "complete", "stage": "complete", "result": response_data})
 
     except WebSocketDisconnect:
         logger.info("Autoflow WebSocket disconnected")
     except Exception as e:
         logger.exception("Autoflow WebSocket error")
         try:
-            await ws.send_json({"stage": "error", "message": str(e)})
+            await channel.close_terminal({"type": "error", "stage": "error", "message": str(e)})
         except Exception:
-            pass
+            logger.debug("failed to deliver terminal error event", exc_info=True)
+            await close_ws(ws, 1011)
     finally:
-        if tmp_path and os.path.exists(tmp_path):
+        if upload and upload.path and os.path.exists(upload.path):
             try:
-                os.unlink(tmp_path)
+                os.unlink(upload.path)
             except OSError:
                 pass
-        try:
-            await ws.close()
-        except Exception:
-            pass
+        await channel.shutdown()
+        await close_ws(ws, 1000)
