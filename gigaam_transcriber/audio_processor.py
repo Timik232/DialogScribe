@@ -12,9 +12,13 @@ import json
 import importlib
 import logging
 import os
+import re
 import shutil
+import signal
 import subprocess
 import tempfile
+import threading
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
@@ -27,6 +31,150 @@ from .exceptions import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Bounds for guarded subprocess execution. Overridable via environment for
+# tests and deployments with unusually slow media pipelines.
+FFMPEG_TIMEOUT_SECONDS = float(os.environ.get("FFMPEG_TIMEOUT_SECONDS", "600") or 600)
+FFPROBE_TIMEOUT_SECONDS = float(os.environ.get("FFPROBE_TIMEOUT_SECONDS", "60") or 60)
+SUBPROCESS_MAX_OUTPUT_BYTES = int(
+    os.environ.get("SUBPROCESS_MAX_OUTPUT_BYTES", str(4 * 1024 * 1024)) or 4 * 1024 * 1024
+)
+_STDERR_TAIL_CHARS = 400
+_READ_CHUNK_BYTES = 65536
+
+# Matches absolute/relative filesystem paths (POSIX and Windows drives) so
+# subprocess diagnostics never leak server-internal paths into API errors.
+_PATH_LIKE_RE = re.compile(r"(?:[A-Za-z]:)?(?:/[\w.\-@]+)+")
+
+
+def _sanitize_detail(text: str) -> str:
+    """Redact path-like tokens and clamp subprocess output included in errors."""
+    redacted = _PATH_LIKE_RE.sub("[path]", text)
+    return redacted[-_STDERR_TAIL_CHARS:]
+
+
+def _remove_partial_output(path: Path) -> None:
+    """Best-effort removal of a partial artifact; cleanup failures are logged."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.error("Failed to remove partial output %s: %s", path.name, exc)
+
+
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    """Forcefully terminate *proc* and, on POSIX, its whole process group."""
+    killed = False
+    try:
+        if hasattr(os, "killpg") and hasattr(os, "getpgid"):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        else:  # pragma: no cover - non-POSIX fallback
+            proc.kill()
+        killed = True
+    except (ProcessLookupError, PermissionError):
+        # Process (or group) already gone — nothing to clean up.
+        pass
+    except OSError as exc:
+        logger.error("Failed to deliver kill signal to subprocess pid=%s: %s", proc.pid, exc)
+        try:
+            proc.kill()
+            killed = True
+        except OSError:
+            pass
+    if not killed and proc.poll() is not None:
+        return
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        logger.error("Subprocess pid=%s did not exit after SIGKILL", proc.pid)
+
+
+def _run_subprocess(
+    cmd: Sequence[str],
+    *,
+    timeout: float | None = None,
+    max_output_bytes: int | None = None,
+    check: bool = True,
+) -> subprocess.CompletedProcess:
+    """Run a subprocess with timeout, bounded output capture and group kill.
+
+    - The child is started in its own session (``start_new_session=True``) so a
+      timeout SIGKILLs the entire process group, leaving no children behind.
+    - stdout/stderr are drained concurrently with hard memory caps; a process
+      whose captured output exceeds ``max_output_bytes`` fails deterministically.
+    - Raised errors carry sanitized diagnostics: no filesystem paths, no stack
+      traces, and only a bounded tail of subprocess output.
+    """
+    if timeout is None:
+        timeout = FFMPEG_TIMEOUT_SECONDS
+    if max_output_bytes is None:
+        max_output_bytes = SUBPROCESS_MAX_OUTPUT_BYTES
+    label = Path(cmd[0]).name if cmd else "subprocess"
+
+    def _drain(stream, sink: list, counter: list) -> None:
+        try:
+            while True:
+                chunk = stream.read(_READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                counter[0] += len(chunk)
+                if len(sink) * _READ_CHUNK_BYTES <= max_output_bytes:
+                    sink.append(chunk)
+        finally:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+    try:
+        proc = subprocess.Popen(
+            [str(arg) for arg in cmd],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except FileNotFoundError as exc:
+        raise AudioProcessingError(
+            f"{label} executable not found on PATH", cause=None
+        ) from exc
+
+    stdout_parts: list[bytes] = []
+    stderr_parts: list[bytes] = []
+    stdout_count = [0]
+    stderr_count = [0]
+    readers = [
+        threading.Thread(target=_drain, args=(proc.stdout, stdout_parts, stdout_count), daemon=True),
+        threading.Thread(target=_drain, args=(proc.stderr, stderr_parts, stderr_count), daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        logger.error(
+            "%s exceeded %.1fs timeout (pid=%s); killing process group",
+            label, timeout, proc.pid,
+        )
+        _kill_process_group(proc)
+        raise AudioProcessingError(
+            f"{label} exceeded {timeout:.0f}s timeout and was terminated"
+        ) from None
+    finally:
+        for reader in readers:
+            reader.join(timeout=15)
+
+    stdout = b"".join(stdout_parts)
+    stderr = b"".join(stderr_parts)
+    if stdout_count[0] > max_output_bytes or stderr_count[0] > max_output_bytes:
+        raise AudioProcessingError(
+            f"{label} produced captured output beyond the allowed limit "
+            f"({max_output_bytes} bytes) and was rejected"
+        )
+    if check and proc.returncode != 0:
+        stderr_tail = _sanitize_detail(stderr.decode(errors="replace"))
+        raise AudioProcessingError(
+            f"{label} failed with exit code {proc.returncode}: {stderr_tail}"
+        )
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
 class AudioProcessor:
@@ -94,7 +242,7 @@ class AudioProcessor:
             return self._get_duration_fallback(path)
 
         try:
-            result = subprocess.run(
+            result = _run_subprocess(
                 [
                     self._ffprobe_path,
                     "-v",
@@ -105,13 +253,12 @@ class AudioProcessor:
                     "json",
                     str(path),
                 ],
-                capture_output=True,
-                text=True,
-                check=True,
+                timeout=FFPROBE_TIMEOUT_SECONDS,
+                check=False,
             )
-            data = json.loads(result.stdout)
+            data = json.loads(result.stdout.decode(errors="replace"))
             return float(data["format"]["duration"])
-        except (subprocess.CalledProcessError, KeyError, json.JSONDecodeError) as e:
+        except (AudioProcessingError, subprocess.CalledProcessError, KeyError, json.JSONDecodeError) as e:
             logger.warning(f"ffprobe failed, using fallback: {e}")
             return self._get_duration_fallback(path)
 
@@ -140,7 +287,7 @@ class AudioProcessor:
             return {"duration": self._get_duration_fallback(path)}
 
         try:
-            result = subprocess.run(
+            result = _run_subprocess(
                 [
                     self._ffprobe_path,
                     "-v",
@@ -151,11 +298,10 @@ class AudioProcessor:
                     "-show_streams",
                     str(path),
                 ],
-                capture_output=True,
-                text=True,
-                check=True,
+                timeout=FFPROBE_TIMEOUT_SECONDS,
+                check=False,
             )
-            data = json.loads(result.stdout)
+            data = json.loads(result.stdout.decode(errors="replace"))
 
             info = {
                 "duration": float(data["format"].get("duration", 0)),
@@ -209,7 +355,8 @@ class AudioProcessor:
             raise UnsupportedFormatError(input_path.suffix)
 
         # Определение выходного пути
-        if output_path is None:
+        owns_output = output_path is None
+        if owns_output:
             fd, output_path = tempfile.mkstemp(suffix=".wav")
             os.close(fd)
         output_path = Path(output_path)
@@ -236,13 +383,13 @@ class AudioProcessor:
         cmd.extend(["-vn", str(output_path)])
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            _run_subprocess(cmd)
             logger.debug(f"Audio normalized: {input_path} -> {output_path}")
             return output_path
-        except subprocess.CalledProcessError as e:
-            raise AudioProcessingError(
-                f"FFmpeg ошибка: {e.stderr}", file_path=str(input_path), cause=e
-            )
+        except AudioProcessingError:
+            if owns_output:
+                _remove_partial_output(output_path)
+            raise
 
     def extract_audio_from_video(
         self,
@@ -267,7 +414,8 @@ class AudioProcessor:
             raise UnsupportedFormatError(video_path.suffix)
 
         # Определение выходного пути
-        if output_path is None:
+        owns_output = output_path is None
+        if owns_output:
             fd, output_path = tempfile.mkstemp(suffix=".wav")
             os.close(fd)
         output_path = Path(output_path)
@@ -302,13 +450,13 @@ class AudioProcessor:
             ]
 
         try:
-            subprocess.run(cmd, capture_output=True, text=True, check=True)
+            _run_subprocess(cmd)
             logger.debug(f"Audio extracted: {video_path} -> {output_path}")
             return output_path
-        except subprocess.CalledProcessError as e:
-            raise AudioProcessingError(
-                f"Ошибка извлечения аудио: {e.stderr}", file_path=str(video_path), cause=e
-            )
+        except AudioProcessingError:
+            if owns_output:
+                _remove_partial_output(output_path)
+            raise
 
     def prepare_for_gigaam(
         self,
@@ -401,7 +549,12 @@ class AudioProcessor:
         chunk_duration: float = 300.0,
         min_chunk_duration: float = 10.0,
     ) -> list[tuple[Path, float, float]]:
-        """Разбиение аудио на временные чанки."""
+        """Разбиение аудио на временные чанки.
+
+        Чанки создаются в отслеживаемом временном каталоге; при любом
+        неуспешном выходе (ошибка ffmpeg, таймаут, отмена) уже созданные
+        и частичные чанки удаляются.
+        """
         audio_path = Path(audio_path)
         total_duration = self.get_duration(audio_path)
 
@@ -411,45 +564,49 @@ class AudioProcessor:
         if remainder > 0:
             num_chunks += 1
 
+        workspace = tempfile.mkdtemp(prefix="dialogscribe-chunks-")
         chunks: list[tuple[Path, float, float]] = []
 
-        for i in range(num_chunks):
-            start = i * chunk_duration
-            duration = min(chunk_duration, total_duration - start)
+        try:
+            for i in range(num_chunks):
+                start = i * chunk_duration
+                duration = min(chunk_duration, total_duration - start)
 
-            fd, output_path = tempfile.mkstemp(suffix=".wav")
-            os.close(fd)
-            output_path = Path(output_path)
+                output_path = Path(workspace) / f"chunk-{i:05d}.wav"
 
-            cmd = [
-                self.ffmpeg_path,
-                "-y",
-                "-ss",
-                str(start),
-                "-i",
-                str(audio_path),
-                "-t",
-                str(duration),
-                "-ar",
-                str(self.SAMPLE_RATE),
-                "-ac",
-                str(self.CHANNELS),
-                "-c:a",
-                "pcm_s16le",
-                "-vn",
-                str(output_path),
-            ]
+                cmd = [
+                    self.ffmpeg_path,
+                    "-y",
+                    "-ss",
+                    str(start),
+                    "-i",
+                    str(audio_path),
+                    "-t",
+                    str(duration),
+                    "-ar",
+                    str(self.SAMPLE_RATE),
+                    "-ac",
+                    str(self.CHANNELS),
+                    "-c:a",
+                    "pcm_s16le",
+                    "-vn",
+                    str(output_path),
+                ]
 
-            try:
-                subprocess.run(cmd, capture_output=True, text=True, check=True)
-            except subprocess.CalledProcessError as e:
-                raise AudioProcessingError(
-                    f"FFmpeg ошибка: {e.stderr}", file_path=str(audio_path), cause=e
-                )
+                try:
+                    _run_subprocess(cmd)
+                except AudioProcessingError:
+                    _remove_partial_output(output_path)
+                    raise
 
-            chunks.append((output_path, start, duration))
+                chunks.append((output_path, start, duration))
 
-        return chunks
+            return chunks
+        except BaseException:
+            for chunk_path, _, _ in chunks:
+                _remove_partial_output(chunk_path)
+            shutil.rmtree(workspace, ignore_errors=True)
+            raise
 
     def load_audio_segment(
         self,

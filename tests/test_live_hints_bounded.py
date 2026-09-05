@@ -404,7 +404,7 @@ class TestChunkValidation:
         import unittest.mock
 
         adapter_module_patch = unittest.mock.patch.object(
-            live_hints_service.subprocess, "run", fake_run
+            live_hints_service, "_run_subprocess", fake_run
         )
 
         async def go():
@@ -491,7 +491,7 @@ class TestChunkValidation:
                 w.writeframes(b"\x00\x00" * 160)
             return SimpleNamespace(returncode=0, stderr=b"")
 
-        monkeypatch.setattr(live_hints_service.subprocess, "run", fake_run)
+        monkeypatch.setattr(live_hints_service, "_run_subprocess", fake_run)
 
         provider = MagicMock()
         provider.transcribe_raw = AsyncMock(return_value="привет")
@@ -512,8 +512,8 @@ class TestChunkValidation:
 
     def test_ffmpeg_failure_returns_empty_without_raise(self, monkeypatch):
         monkeypatch.setattr(
-            live_hints_service.subprocess,
-            "run",
+            live_hints_service,
+            "_run_subprocess",
             MagicMock(return_value=SimpleNamespace(returncode=1, stderr=b"bad")),
         )
         provider = MagicMock()
@@ -541,7 +541,7 @@ class TestChunkValidation:
                 w.writeframes(b"\x00\x00" * 160)
             return SimpleNamespace(returncode=0, stderr=b"")
 
-        monkeypatch.setattr(live_hints_service.subprocess, "run", fake_run)
+        monkeypatch.setattr(live_hints_service, "_run_subprocess", fake_run)
         provider = MagicMock()
         provider.transcribe_raw = AsyncMock(return_value="ok")
         monkeypatch.setattr(live_hints_service, "get_asr_provider", MagicMock(return_value=provider))

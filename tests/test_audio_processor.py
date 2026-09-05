@@ -93,7 +93,7 @@ class TestAudioProcessorFormats:
 
 class TestAudioProcessorDenoise:
 
-    @patch("gigaam_transcriber.audio_processor.subprocess.run")
+    @patch("gigaam_transcriber.audio_processor._run_subprocess")
     def test_normalize_denoise_none_no_filter(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0)
         try:
@@ -107,7 +107,7 @@ class TestAudioProcessorDenoise:
         assert "arnndn" not in " ".join(cmd)
         assert "afftdn" not in " ".join(cmd)
 
-    @patch("gigaam_transcriber.audio_processor.subprocess.run")
+    @patch("gigaam_transcriber.audio_processor._run_subprocess")
     def test_normalize_denoise_light_arnndn(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0)
         try:
@@ -120,7 +120,7 @@ class TestAudioProcessorDenoise:
         assert "-af" in cmd
         assert "arnndn" in cmd
 
-    @patch("gigaam_transcriber.audio_processor.subprocess.run")
+    @patch("gigaam_transcriber.audio_processor._run_subprocess")
     def test_normalize_denoise_medium_afftdn(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0)
         try:

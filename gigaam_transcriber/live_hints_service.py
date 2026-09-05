@@ -11,13 +11,15 @@ import json
 import logging
 import os
 import re
-import subprocess
+import shutil
 import tempfile
 import time
 import wave
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
+from .audio_processor import _run_subprocess
 from .context_utils import estimate_tokens, estimate_tokens_accurate
 from .exceptions import ASRError
 from .asr_provider import get_asr_provider
@@ -48,6 +50,15 @@ def _env_float(name: str, default: float) -> float:
     except (TypeError, ValueError):
         return default
     return value if value > 0 else default
+
+
+LIVE_HINTS_FFMPEG_TIMEOUT_SECONDS = _env_float(
+    "LIVE_HINTS_FFMPEG_TIMEOUT_SECONDS", 10.0
+)
+
+
+def _live_hints_ffmpeg_path() -> str:
+    return shutil.which("ffmpeg") or "ffmpeg"
 
 
 @dataclass(frozen=True)
@@ -281,7 +292,8 @@ class AudioAdapter:
         """Sync worker-thread body: ffmpeg WebM → WAV bytes.
 
         Returns None when ffmpeg cannot decode the chunk (silence / garbage);
-        tempfiles are always removed.
+        tempfiles are always removed. ffmpeg runs through the guarded
+        subprocess helper (timeout + process-group kill + bounded capture).
         """
         tmp_webm: str | None = None
         tmp_wav: str | None = None
@@ -293,9 +305,20 @@ class AudioAdapter:
 
             fd2, tmp_wav = tempfile.mkstemp(suffix=".wav")
             os.close(fd2)
-            result = subprocess.run(
-                ["ffmpeg", "-y", "-i", tmp_webm, "-ar", "16000", "-ac", "1", tmp_wav],
-                capture_output=True, timeout=10,
+            result = _run_subprocess(
+                [
+                    _live_hints_ffmpeg_path(),
+                    "-y",
+                    "-i",
+                    tmp_webm,
+                    "-ar",
+                    "16000",
+                    "-ac",
+                    "1",
+                    tmp_wav,
+                ],
+                timeout=LIVE_HINTS_FFMPEG_TIMEOUT_SECONDS,
+                check=False,
             )
             if result.returncode != 0:
                 # ffmpeg couldn't decode — likely silence / empty chunk, skip
@@ -310,6 +333,7 @@ class AudioAdapter:
                     try:
                         os.unlink(p)
                     except OSError:
+                        logger.warning("live-hints: failed to remove decode tempfile %s", Path(p).name)
                         pass
 
     async def close(self) -> None:

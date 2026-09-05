@@ -15,6 +15,7 @@ import contextlib
 import inspect
 import logging
 import os
+import shutil
 import threading
 import time
 import warnings
@@ -626,6 +627,8 @@ class GigaAMTranscriber:
                     chunk_file.unlink()
                 except Exception:
                     pass
+            if chunk_files:
+                shutil.rmtree(chunk_files[0].parent, ignore_errors=True)
 
     def _transcribe_video(
         self,
