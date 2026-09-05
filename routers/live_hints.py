@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+from collections import deque
 from types import SimpleNamespace
 from typing import Literal, cast
 
@@ -56,7 +57,7 @@ class _SessionStats:
         self.chunks_processed = 0
         self.dropped_chunks = 0
         self.last_drop_log = 0.0
-        self.last_status_ts = 0.0
+        self.last_status_ts = time.monotonic()
 
 
 # ─── REST endpoints ────────────────────────────────────────────
@@ -114,12 +115,41 @@ async def live_hints_ws(ws: WebSocket):
         session_config=None,
         last_hint_time=0.0,
     )
-    transcript_segments: list[str] = []
-    max_transcript_segments = bounds.max_segments
+    transcript_segments: deque[str] = deque(maxlen=bounds.max_segments)
     stats = _SessionStats()
 
     recv_queue: asyncio.Queue = asyncio.Queue(maxsize=bounds.recv_queue)
     process_queue: asyncio.Queue = asyncio.Queue(maxsize=bounds.process_queue)
+
+    def _status_payload() -> dict:
+        caps = accumulator.caps.as_dict() if accumulator.caps else {}
+        caps.update(
+            recv_queue=bounds.recv_queue,
+            process_queue=bounds.process_queue,
+            max_segments=bounds.max_segments,
+        )
+        return {
+            "queues": {"recv": recv_queue.qsize(), "process": process_queue.qsize()},
+            "dropped": stats.dropped_chunks,
+            "invalid_chunks": getattr(audio_adapter, "invalid_chunks", 0),
+            "accumulators": {
+                **accumulator.sizes(),
+                "segments": len(transcript_segments),
+            },
+            "caps": caps,
+        }
+
+    def _emit_backpressure_status() -> None:
+        channel.emit(
+            StatusMessage(status="backpressure", **_status_payload()).model_dump()
+        )
+
+    def _maybe_emit_interval_status(now: float) -> None:
+        if now - stats.last_status_ts >= bounds.status_interval:
+            stats.last_status_ts = now
+            channel.emit(
+                StatusMessage(status="processing", **_status_payload()).model_dump()
+            )
 
     def _note_drop() -> None:
         stats.dropped_chunks += 1
@@ -130,6 +160,7 @@ async def live_hints_ws(ws: WebSocket):
                 "live-hints recv queue full (recv=%d process=%d); dropped oldest chunk, total dropped=%d",
                 recv_queue.qsize(), process_queue.qsize(), stats.dropped_chunks,
             )
+        _emit_backpressure_status()
 
     def _enqueue(item: tuple) -> None:
         """FIFO enqueue with drop-oldest overflow; drops are always counted."""
@@ -232,8 +263,6 @@ async def live_hints_ws(ws: WebSocket):
         now = time.time()
         segment = f"{prefix} {text.strip()}"
         transcript_segments.append(segment)
-        if len(transcript_segments) > max_transcript_segments:
-            del transcript_segments[: len(transcript_segments) - max_transcript_segments]
 
         await channel.send(
             TranscriptMessage(
@@ -259,7 +288,7 @@ async def live_hints_ws(ws: WebSocket):
             trigger_event = pause_event
         elif timer_fired:
             trigger_event = event_detector.create_timer_event(
-                "\n".join(transcript_segments[-20:])
+                "\n".join(list(transcript_segments)[-20:])
             )
 
         # ── Live Advisor: cascade hint generation ───────
@@ -271,7 +300,7 @@ async def live_hints_ws(ws: WebSocket):
 
             context_summary = accumulator.get_context_summary()
             feedback_bias = accumulator.get_feedback_bias_text()
-            transcript_window = "\n".join(transcript_segments[-20:])
+            transcript_window = "\n".join(list(transcript_segments)[-20:])
 
             try:
                 hint = await asyncio.to_thread(
@@ -333,7 +362,7 @@ async def live_hints_ws(ws: WebSocket):
         try:
             context_summary = accumulator.get_context_summary()
             feedback_bias = accumulator.get_feedback_bias_text()
-            transcript_window = "\n".join(transcript_segments[-20:])
+            transcript_window = "\n".join(list(transcript_segments)[-20:])
 
             hint = await asyncio.to_thread(
                 cascade.run,
@@ -372,6 +401,7 @@ async def live_hints_ws(ws: WebSocket):
         while True:
             item = await process_queue.get()
             try:
+                _maybe_emit_interval_status(time.monotonic())
                 if item[0] == "audio":
                     await _process_audio(item[1], item[2])
                 elif item[0] == "hint_request":

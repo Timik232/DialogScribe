@@ -170,6 +170,9 @@ class TestBoundedPipeline:
         assert len(transcripts) == 500
         seqs = [m["seq"] for m in msgs]
         assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+        acc = patched_deps.accumulators[-1]
+        assert len(acc.prices_mentioned) <= acc.caps.max_prices
+        assert len(acc.facts) <= acc.caps.max_facts
         assert elapsed < 30
 
     def test_saturation_drops_oldest_and_receive_never_blocks(self, monkeypatch, patched_deps, caplog):
@@ -199,6 +202,13 @@ class TestBoundedPipeline:
             if "dropped oldest chunk" in r.getMessage()
         ]
         assert drop_warnings, "overflow must be logged (never silent)"
+
+        bp = [m for m in sent_json(fake) if m["type"] == "status" and m["status"] == "backpressure"]
+        assert bp, "overflow must be surfaced as a backpressure status event"
+        last = bp[-1]
+        assert last["dropped"] >= 1
+        assert set(last["queues"]) == {"recv", "process"}
+        assert last["accumulators"]["segments"] <= last["caps"]["max_segments"]
 
     def test_shutdown_leaves_no_orphan_tasks(self, monkeypatch, patched_deps):
         patched_deps.adapter.process_chunk_bytes = AsyncMock(return_value="ok")
@@ -233,6 +243,54 @@ class TestBoundedPipeline:
         assert any(m["type"] == "status" and m["status"] == "ready" for m in msgs)
         assert patched_deps.cascade.run.called
         assert any(m["type"] == "transcript" for m in msgs)
+
+
+class TestAccumulatorCaps:
+    def test_histories_are_bounded_deques_with_env_caps(self, monkeypatch):
+        monkeypatch.setenv("LIVE_HINTS_MAX_FACTS", "3")
+        monkeypatch.setenv("LIVE_HINTS_MAX_HINTS", "5")
+        monkeypatch.setenv("LIVE_HINTS_MAX_PRICES", "2")
+        from gigaam_transcriber.accumulator import SessionAccumulator
+
+        acc = SessionAccumulator()
+        assert acc.facts.maxlen == 3
+        assert acc.hint_history.maxlen == 5
+        assert acc.prices_mentioned.maxlen == 2
+
+    def test_eviction_is_oldest_out(self):
+        import time as _time
+        from gigaam_transcriber.accumulator import SessionAccumulator, AccumulatorCaps
+
+        acc = SessionAccumulator(caps=AccumulatorCaps(max_facts=2, max_hints=10, max_key_topics=10, max_objections=10, max_prices=2))
+        acc.add_fact("first", "entity", 1.0)
+        acc.add_fact("second", "entity", 2.0)
+        acc.add_fact("third", "entity", 3.0)
+        assert [f.text for f in acc.facts] == ["second", "third"]
+
+        acc.prices_mentioned.append("100 руб")
+        acc.prices_mentioned.append("200 руб")
+        acc.prices_mentioned.append("300 руб")
+        assert list(acc.prices_mentioned) == ["200 руб", "300 руб"]
+
+        assert acc.sizes() == {
+            "facts": 2, "hint_history": 0, "key_topics": 0,
+            "objections_raised": 0, "prices_mentioned": 2,
+        }
+        assert _time.time() >= 0
+
+    def test_get_hint_history_returns_recent_records(self):
+        from gigaam_transcriber.accumulator import SessionAccumulator
+        from gigaam_transcriber.hint_typology import Hint, HintType, HintPriority
+
+        acc = SessionAccumulator()
+        for i in range(7):
+            acc.add_hint(Hint(
+                hint_id=f"h{i}", type=HintType.TACTICAL, text=f"t{i}",
+                priority=HintPriority.MEDIUM, rationale="", timestamp=float(i),
+            ))
+        recent = acc.get_hint_history(3)
+        assert [r.hint_id for r in recent] == ["h4", "h5", "h6"]
+        assert acc.get_hint_history(0) == []
 
 
 class TestAudioAdapterOffLoop:

@@ -118,12 +118,25 @@ class StatusMessage(BaseModel):
 
     Поля:
         status: Текущий статус — «transcribing», «generating_hints», «ready» или «error».
+        queues: Глубины очередей пайплайна (recv / process) для индикации backpressure.
+        dropped: Сколько аудиочанков было отброшено при переполнении очереди.
+        invalid_chunks: Сколько чанков не прошло валидацию длительности/размера.
+        accumulators: Текущие размеры накопителей сессии (сегменты, факты и т.д.).
+        caps: Конфигурированные пределы очередей и накопителей.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["status"] = "status"
-    status: Literal["transcribing", "generating_hints", "ready", "error", "silent_chunk", "processing"]
+    status: Literal[
+        "transcribing", "generating_hints", "ready", "error",
+        "silent_chunk", "processing", "backpressure", "invalid_chunk",
+    ]
+    queues: Optional[dict[str, int]] = None
+    dropped: Optional[int] = None
+    invalid_chunks: Optional[int] = None
+    accumulators: Optional[dict[str, int]] = None
+    caps: Optional[dict[str, int]] = None
 
 
 class FeedbackAckMessage(BaseModel):

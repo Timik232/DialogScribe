@@ -1,11 +1,56 @@
 """Session Accumulator — cumulative state for Live Advisor Agent."""
 
+import os
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 from difflib import SequenceMatcher
 
 from gigaam_transcriber.hint_typology import Hint, HintType, HintPriority
 from gigaam_transcriber.meeting_brief_models import MeetingBrief
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+@dataclass(frozen=True)
+class AccumulatorCaps:
+    """Per-session bounds for every history the accumulator keeps.
+
+    Every list is a deque with ``maxlen`` so memory is bounded by these caps
+    regardless of session length; eviction is oldest-out.
+    """
+
+    max_facts: int = 50
+    max_hints: int = 100
+    max_key_topics: int = 40
+    max_objections: int = 40
+    max_prices: int = 40
+
+    @classmethod
+    def from_env(cls) -> "AccumulatorCaps":
+        return cls(
+            max_facts=_env_int("LIVE_HINTS_MAX_FACTS", 50),
+            max_hints=_env_int("LIVE_HINTS_MAX_HINTS", 100),
+            max_key_topics=_env_int("LIVE_HINTS_MAX_KEY_TOPICS", 40),
+            max_objections=_env_int("LIVE_HINTS_MAX_OBJECTIONS", 40),
+            max_prices=_env_int("LIVE_HINTS_MAX_PRICES", 40),
+        )
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "max_facts": self.max_facts,
+            "max_hints": self.max_hints,
+            "max_key_topics": self.max_key_topics,
+            "max_objections": self.max_objections,
+            "max_prices": self.max_prices,
+        }
 
 
 @dataclass
@@ -28,9 +73,16 @@ class HintRecord:
     feedback: Optional[str] = None  # "like" or "dislike"
 
 
+_MAX_FEEDBACK_TYPES = 8
+
+
 @dataclass
 class SessionAccumulator:
-    """Cumulative state of the current meeting session."""
+    """Cumulative state of the current meeting session.
+
+    All history collections are bounded deques (oldest evicted) sized by
+    ``caps`` (defaults :class:`AccumulatorCaps.from_env`).
+    """
     meeting_brief: MeetingBrief = field(default_factory=MeetingBrief)
     facts: list[Fact] = field(default_factory=list)
     hint_history: list[HintRecord] = field(default_factory=list)
@@ -39,10 +91,32 @@ class SessionAccumulator:
     objections_raised: list[str] = field(default_factory=list)
     prices_mentioned: list[str] = field(default_factory=list)
     last_hint_ts: float = 0.0
+    caps: Optional[AccumulatorCaps] = None
 
     # Feedback tracking for biasing
     _liked_types: list[str] = field(default_factory=list)
     _disliked_types: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        caps = self.caps or AccumulatorCaps.from_env()
+        self.caps = caps
+        self.facts = deque(self.facts, maxlen=caps.max_facts)
+        self.hint_history = deque(self.hint_history, maxlen=caps.max_hints)
+        self.key_topics = deque(self.key_topics, maxlen=caps.max_key_topics)
+        self.objections_raised = deque(self.objections_raised, maxlen=caps.max_objections)
+        self.prices_mentioned = deque(self.prices_mentioned, maxlen=caps.max_prices)
+        self._liked_types = deque(self._liked_types, maxlen=_MAX_FEEDBACK_TYPES)
+        self._disliked_types = deque(self._disliked_types, maxlen=_MAX_FEEDBACK_TYPES)
+
+    def sizes(self) -> dict[str, int]:
+        """Current length of every bounded history (for status reporting)."""
+        return {
+            "facts": len(self.facts),
+            "hint_history": len(self.hint_history),
+            "key_topics": len(self.key_topics),
+            "objections_raised": len(self.objections_raised),
+            "prices_mentioned": len(self.prices_mentioned),
+        }
 
     def add_fact(self, text: str, category: str, timestamp: float) -> None:
         """Add a fact if not duplicate."""
@@ -146,7 +220,9 @@ class SessionAccumulator:
 
     def get_hint_history(self, limit: int = 5) -> list[HintRecord]:
         """Get most recent hint records."""
-        return self.hint_history[-limit:]
+        if limit <= 0:
+            return []
+        return list(self.hint_history)[-limit:]
 
     def check_duplicate_hint(self, hint_text: str, window_seconds: float = 180.0) -> bool:
         """Check if a similar hint was generated within the time window (default 3 min).
