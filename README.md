@@ -102,10 +102,10 @@ docker compose up -d
 docker compose -f docker-compose.dev.yaml up -d --build
 ```
 
-Для запуска тестов (488 тестов, не требуют GPU/HF-токен):
+Для запуска тестов (900+ тестов, не требуют GPU/HF-токен):
 
 ```bash
-python -m pytest -m "not slow and not requires_gpu and not requires_hf_token and not requires_model"
+HOME=/tmp PYTHONUSERBASE=$HOME/.local JWT_SECRET=ci-test-only python -m pytest -q -m "not slow and not requires_gpu and not requires_hf_token and not requires_model"
 ```
 
 ### Vault Agent
@@ -116,18 +116,23 @@ python -m pytest -m "not slow and not requires_gpu and not requires_hf_token and
 
 | Endpoint | Описание |
 |----------|----------|
-| `POST /v1/audio/transcriptions` | OpenAI-совместимая транскрипция |
+| `POST /v1/audio/transcriptions` | OpenAI-совместимая транскрипция — **выключена по умолчанию** (503; включается `V1_API_ENABLED=true` + `API_KEY`) |
 | `POST /api/transcribe` | Транскрипция с расширенными параметрами |
 | `POST /api/summary` | Генерация саммари (LLM) |
 | `POST /api/mindmap` | Генерация майндмапа (LLM) |
 | `POST /api/insights` | Извлечение инсайтов (LLM) |
 | `POST /api/chat` | Чат с контекстом транскрипции |
-| `WS /api/live-hints/ws` | Live-подсказки в реальном времени (WebSocket, JWT auth via query param) |
+| `WS /api/live-hints/ws` | Live-подсказки в реальном времени (WebSocket, JWT auth via query param; ошибки протокола — close-коды 44xx) |
+| `WS /api/autoflow/ws` | Автопоток транскрипции+аналитики (WebSocket, JWT via query param; лимиты — terminal-событие `limit_exceeded`) |
 | `GET/PUT /api/settings/asr-provider` | Настройка ASR-провайдера пользователя (mistral/litellm, по умолчанию litellm) |
 | `GET /api/models` | Список доступных LLM-моделей |
-| Auth routes | Регистрация, логин, восстановление пароля |
+| `/api/saved-transcriptions` | CRUD сохранённых транскрипций + share-ссылки (`/api/share/{share_id}` — публичный доступ без auth) |
+| `POST /api/meeting-prep` | Подготовка к встрече (LLM) |
+| Auth routes | Регистрация, логин, refresh/logout, восстановление пароля (rate-limited) |
 | Admin routes | Управление пользователями, лимитами |
-| Export routes | Экспорт в TXT, JSON, SRT, VTT, DOCX |
+| Export routes | Экспорт в TXT, JSON, SRT, VTT, DOCX, PDF |
+
+Ошибки API возвращают стабильный код + `correlation_id` (заголовок `X-Correlation-ID` на каждом ответе) — детали остаются в серверных логах.
 
 ## Переменные окружения
 

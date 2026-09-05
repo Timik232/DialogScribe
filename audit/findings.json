@@ -1,12 +1,4 @@
 {
-  "schema_version": 1,
-  "generated_at": "2026-09-04T22:51:18+03:00",
-  "baseline": {
-    "trivy_version": "0.74.0",
-    "filesystem_source": "/tmp/opencode/trivy-fs-report.json (normalized; secret values omitted)",
-    "image_source": "192.168.1.47:7002/dialogscribe:latest (Debian 13.6)",
-    "sonar_limitation": "Historical dedicated Sonar instance was removed; available export contains zero issues. Appendix seed IDs are preserved and exact keys are not invented."
-  },
   "findings": [
     {
       "id": "CQ-C1",
@@ -171,12 +163,13 @@
       "severity": "Low",
       "affected_artifact": "root mindmap.py, models/modules",
       "description": "Dead/unused root mindmap plugin, MeetingPrepPlan, globals and partial router exports",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 17 / Release C",
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-17-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-17-verification.txt",
-      "expiry": ""
+      "evidence_path": ".sisyphus/evidence/task-17-compatibility.txt; .sisyphus/evidence/task-17-quality-gates.json",
+      "expiry": "",
+      "remediation_note": "MeetingPrepPlan ORM mapping removed (zero references; migration-007 table intentionally unmapped); routers/__init__ partial re-exports dropped (submodules imported directly); unused legacy model imports removed; mindmap module symbols verified in active use (tests/exporters/analysis)."
     },
     {
       "id": "CQ-L2",
@@ -185,12 +178,13 @@
       "severity": "Low",
       "affected_artifact": "gigaam_transcriber/utils.py",
       "description": "Logging setup adds duplicate file handlers",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 17 / Release C",
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-17-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-17-verification.txt",
-      "expiry": ""
+      "evidence_path": ".sisyphus/evidence/task-17-compatibility.txt; .sisyphus/evidence/task-17-quality-gates.json",
+      "expiry": "",
+      "remediation_note": "setup_logging LLM RotatingFileHandler attach is lock-guarded and deduped by baseFilename; concurrent 8-thread test proves exactly one handler per path (tests/test_logging_idempotency.py)."
     },
     {
       "id": "CQ-L3",
@@ -199,12 +193,13 @@
       "severity": "Low",
       "affected_artifact": "transcribe page/sessionStorage",
       "description": "Persisted browser transcription state lacks shape/version validation",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 17 / Release C",
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-17-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-17-verification.txt",
-      "expiry": ""
+      "evidence_path": ".sisyphus/evidence/task-17-compatibility.txt; .sisyphus/evidence/task-17-quality-gates.json",
+      "expiry": "",
+      "remediation_note": "transcription sessionStorage payloads versioned {version:2,data} with full shape validation; legacy/no-version/garbage payloads reset to fresh state without throwing (evidence harness, task-17-compatibility.txt)."
     },
     {
       "id": "CQ-M1",
@@ -242,12 +237,13 @@
       "severity": "Medium",
       "affected_artifact": "frontend/src/lib/services/api.ts",
       "description": "Frontend JSON/blob API helpers duplicate refresh/retry logic",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 17 / Release C",
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-17-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-17-verification.txt",
-      "expiry": ""
+      "evidence_path": ".sisyphus/evidence/task-17-compatibility.txt; .sisyphus/evidence/task-17-quality-gates.json",
+      "expiry": "",
+      "remediation_note": "fetchApi/fetchApiBlob share one fetchWithRefresh implementation (single 401->refresh->retry path); JSON error bodies surface detail.error.message."
     },
     {
       "id": "CQ-M12",
@@ -256,12 +252,13 @@
       "severity": "Medium",
       "affected_artifact": "tests/frontend test infrastructure",
       "description": "Missing frontend and targeted ASR/diarization/concurrency regression coverage",
-      "disposition": "planned",
+      "disposition": "accepted",
       "owner": "DialogScribe remediation team",
       "target": "Task 17 / Release C",
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-17-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-17-verification.txt",
-      "expiry": ""
+      "evidence_path": ".sisyphus/evidence/task-17-compatibility.txt; .sisyphus/evidence/task-17-quality-gates.json",
+      "expiry": "2026-12-04",
+      "remediation_note": "Backend regression coverage landed across tasks 13-17 (ASR lifecycle/concurrency, diarization alignment+cache, export resource safety, subprocess group-kill, segments normalization, correlation errors, logging idempotency = 100+ new tests; suite 948 passed). Frontend unit-test infrastructure (vitest) still absent; frontend quality gated by svelte-check (13-error accepted baseline) + production build. Owner: DialogScribe remediation team; expiry 2026-12-04; review at or before expiry."
     },
     {
       "id": "CQ-M13",
@@ -370,12 +367,13 @@
       "severity": "Medium",
       "affected_artifact": "models.py, migration 008",
       "description": "UserSettings.user_id lacks FK and ORM/server defaults drift (litellm vs mistral)",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 12 / Release C",
-      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-12-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-12-verification.txt",
-      "expiry": ""
+      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-17-verification.txt",
+      "evidence_path": ".sisyphus/evidence/task-17-compatibility.txt; .sisyphus/evidence/task-17-quality-gates.json",
+      "expiry": "",
+      "remediation_note": "UserSettings.user_id now FK -> users.id ON DELETE CASCADE (models.py + backward-compatible batch migration 012; orphan rows deleted first as unreachable); ORM/server default drift was already aligned to litellm by Task 12 / migration 011."
     },
     {
       "id": "CQ-M8",
@@ -384,12 +382,13 @@
       "severity": "Medium",
       "affected_artifact": "routers/saved_transcriptions.py",
       "description": "Saved-transcription segment schema drifts list-vs-dict through or {}",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 17 / Release C",
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-17-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-17-verification.txt",
-      "expiry": ""
+      "evidence_path": ".sisyphus/evidence/task-17-compatibility.txt; .sisyphus/evidence/task-17-quality-gates.json",
+      "expiry": "",
+      "remediation_note": "One canonical segments list schema: write path stores _normalize_segments(body.segments) (no [] -> {} coercion); read paths (owner GET, public share) normalize legacy dict shapes deterministically with no data loss; tests cover both legacy shapes (tests/test_segments_normalization.py)."
     },
     {
       "id": "CQ-M9",
@@ -398,12 +397,13 @@
       "severity": "Medium",
       "affected_artifact": "affected routers",
       "description": "Raw exception details leak from analysis/helpers/Autoflow/auth endpoints",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 17 / Release C",
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-17-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-17-verification.txt",
-      "expiry": ""
+      "evidence_path": ".sisyphus/evidence/task-17-compatibility.txt; .sisyphus/evidence/task-17-quality-gates.json",
+      "expiry": "",
+      "remediation_note": "CorrelationIdMiddleware (pure ASGI) assigns uuid per request + X-Correlation-ID header; log filter stamps correlation_id on records; analysis/saved-transcriptions/autoflow/live-hints errors return {error:{code,message,correlation_id}} only; /v1 transcription errors map to stable per-class messages (no stack/path/provider body). tests/test_correlation_errors.py."
     },
     {
       "id": "SEC-C1",
@@ -572,12 +572,13 @@
       "affected_artifact": "frontend/src/app.html",
       "description": "frontend/src/app.html lacks <title>",
       "notes": "Stable seed retained; exact historical Sonar key unavailable and not invented.",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 17 / Release C",
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-17-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-17-verification.txt",
-      "expiry": ""
+      "evidence_path": ".sisyphus/evidence/task-17-compatibility.txt; .sisyphus/evidence/task-17-quality-gates.json",
+      "expiry": "",
+      "remediation_note": "<title>DialogScribe</title> added to frontend/src/app.html; svelte-check stays at 13-error baseline, build green."
     },
     {
       "id": "SONAR-CS1",
@@ -587,12 +588,13 @@
       "affected_artifact": "routers/live_hints.py",
       "description": "routers/live_hints.py cognitive complexity 138",
       "notes": "Stable seed retained; exact historical Sonar key unavailable and not invented.",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 17 / Release C",
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-17-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-17-verification.txt",
-      "expiry": ""
+      "evidence_path": ".sisyphus/evidence/task-17-compatibility.txt; .sisyphus/evidence/task-17-quality-gates.json",
+      "expiry": "",
+      "remediation_note": "live_hints.py refactored into _LiveHintsSession with named state-machine helpers (status/backpressure, FIFO enqueue, dispatch/process workers, cascade+fallback hint generation, control-frame dispatcher); pinned task-8/task-10 suites (26 tests) unchanged and green."
     },
     {
       "id": "SONAR-CS2",
@@ -602,12 +604,13 @@
       "affected_artifact": "routers/settings.py",
       "description": "routers/settings.py cognitive complexity 24",
       "notes": "Stable seed retained; exact historical Sonar key unavailable and not invented.",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 17 / Release C",
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-17-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-17-verification.txt",
-      "expiry": ""
+      "evidence_path": ".sisyphus/evidence/task-17-compatibility.txt; .sisyphus/evidence/task-17-quality-gates.json",
+      "expiry": "",
+      "remediation_note": "settings.py asr_test branch nest extracted into _probe_provider/_close_provider helpers; tests/test_settings_router.py green."
     },
     {
       "id": "SONAR-CS3",
@@ -617,12 +620,13 @@
       "affected_artifact": "gigaam_transcriber/summarizer.py",
       "description": "summarizer.py cognitive complexity 23",
       "notes": "Stable seed retained; exact historical Sonar key unavailable and not invented.",
-      "disposition": "planned",
+      "disposition": "accepted",
       "owner": "DialogScribe remediation team",
       "target": "Task 17 / Release C",
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-17-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-17-verification.txt",
-      "expiry": ""
+      "evidence_path": ".sisyphus/evidence/task-17-compatibility.txt; .sisyphus/evidence/task-17-quality-gates.json",
+      "expiry": "2026-12-04",
+      "remediation_note": "summarizer.py cognitive complexity 23 sits in the map-reduce budget strategy chain whose event-loop offload semantics and reduce-overflow behavior are pinned by task-14/test_reduce_overflow suites; a further mechanical split risks behavior drift for threshold-adjacent gain. Owner: DialogScribe remediation team; expiry 2026-12-04; review at or before expiry."
     },
     {
       "id": "SONAR-CS4",
@@ -632,12 +636,13 @@
       "affected_artifact": "gigaam_transcriber/mistral_client.py",
       "description": "mistral_client.py cognitive complexity 23",
       "notes": "Stable seed retained; exact historical Sonar key unavailable and not invented.",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 17 / Release C",
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-17-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-17-verification.txt",
-      "expiry": ""
+      "evidence_path": ".sisyphus/evidence/task-17-compatibility.txt; .sisyphus/evidence/task-17-quality-gates.json",
+      "expiry": "",
+      "remediation_note": "Mistral retry/rate-limit logic consolidated into _throttle + _post_transcription shared by both request paths; provider response body no longer embedded in ASRError text."
     },
     {
       "id": "SONAR-CS5",
@@ -647,12 +652,13 @@
       "affected_artifact": "transcriber/insights/chat/mindmap modules",
       "description": "Transcriber/insights/chat/mindmap complexity 18-19",
       "notes": "Stable seed retained; exact historical Sonar key unavailable and not invented.",
-      "disposition": "planned",
+      "disposition": "accepted",
       "owner": "DialogScribe remediation team",
       "target": "Task 17 / Release C",
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-17-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-17-verification.txt",
-      "expiry": ""
+      "evidence_path": ".sisyphus/evidence/task-17-compatibility.txt; .sisyphus/evidence/task-17-quality-gates.json",
+      "expiry": "2026-12-04",
+      "remediation_note": "transcriber/insights/chat/mindmap modules at 18-19 cognitive complexity are below the flagged-seed band and carry the heaviest pinned coverage in the repo (asr lifecycle, chat cache, insights JSON parsing, mindmap reduce); behavior-preserving extraction is scheduled as follow-up refactoring. Owner: DialogScribe remediation team; expiry 2026-12-04; review at or before expiry."
     },
     {
       "id": "SONAR-CS6",
@@ -662,12 +668,13 @@
       "affected_artifact": "Python modules reported by historical Sonar scan",
       "description": "Duplicate separator literals, unused vars/params and redundant exception classes; exact remaining issue keys imported in Task 1",
       "notes": "Stable seed retained; exact historical Sonar key unavailable and not invented.",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 17 / Release C",
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-17-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-17-verification.txt",
-      "expiry": ""
+      "evidence_path": ".sisyphus/evidence/task-17-compatibility.txt; .sisyphus/evidence/task-17-quality-gates.json",
+      "expiry": "",
+      "remediation_note": "Duplicate separator/literal duplication removed via mistral retry consolidation + api.ts fetchWithRefresh + shared AsrProviderSelect; unused vars/imports removed (models, live_hints); exception classes documented as public API (exported in gigaam_transcriber __all__, HFTokenMissingError raised in diarization)."
     },
     {
       "id": "SONAR-HS1",
@@ -677,12 +684,13 @@
       "affected_artifact": "Python logging call site 1 (historical key unavailable)",
       "description": "Three low log-injection hotspots; Task 1 replaces range with exact Sonar issue keys",
       "notes": "Stable seed retained; exact historical Sonar key unavailable and not invented.",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 17 / Release C",
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-17-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-17-verification.txt",
-      "expiry": ""
+      "evidence_path": ".sisyphus/evidence/task-17-compatibility.txt; .sisyphus/evidence/task-17-quality-gates.json",
+      "expiry": "",
+      "remediation_note": "insights.py log-injection sites now log exception class name + exc_info instead of raw str(e) interpolation."
     },
     {
       "id": "SONAR-HS2",
@@ -692,12 +700,13 @@
       "affected_artifact": "Python logging call site 2 (historical key unavailable)",
       "description": "Three low log-injection hotspots; Task 1 replaces range with exact Sonar issue keys",
       "notes": "Stable seed retained; exact historical Sonar key unavailable and not invented.",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 17 / Release C",
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-17-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-17-verification.txt",
-      "expiry": ""
+      "evidence_path": ".sisyphus/evidence/task-17-compatibility.txt; .sisyphus/evidence/task-17-quality-gates.json",
+      "expiry": "",
+      "remediation_note": "mindmap.py log-injection sites now log exception class name + exc_info instead of raw str(e) interpolation."
     },
     {
       "id": "SONAR-HS3",
@@ -707,12 +716,13 @@
       "affected_artifact": "Python logging call site 3 (historical key unavailable)",
       "description": "Three low log-injection hotspots; Task 1 replaces range with exact Sonar issue keys",
       "notes": "Stable seed retained; exact historical Sonar key unavailable and not invented.",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 17 / Release C",
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-17-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-17-verification.txt",
-      "expiry": ""
+      "evidence_path": ".sisyphus/evidence/task-17-compatibility.txt; .sisyphus/evidence/task-17-quality-gates.json",
+      "expiry": "",
+      "remediation_note": "Remaining low log-injection surface covered by the same class-name+exc_info pattern; correlation filter adds request context for log correlation."
     },
     {
       "id": "SONAR-HS4",
@@ -722,12 +732,13 @@
       "affected_artifact": "gigaam_transcriber/chat.py",
       "description": "Low hashing hotspot in chat.py; Task 1 replaces with exact issue key",
       "notes": "Stable seed retained; exact historical Sonar key unavailable and not invented.",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 17 / Release C",
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-17-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-17-verification.txt",
-      "expiry": ""
+      "evidence_path": ".sisyphus/evidence/task-17-compatibility.txt; .sisyphus/evidence/task-17-quality-gates.json",
+      "expiry": "",
+      "remediation_note": "chat.py chunk-summary cache key switched md5 -> sha256 (non-crypto use); tests/test_chat.py green."
     },
     {
       "id": "TRIVY-FS-SECRET-0001",
