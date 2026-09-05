@@ -752,12 +752,13 @@
       "severity": "MEDIUM",
       "affected_artifact": ".playwright-mcp/console-2026-05-05T08-39-47-458Z.log:line 1",
       "description": "JWT detector match; matched value intentionally omitted",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 20 / Release D",
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-20-verification.txt",
       "evidence_path": ".sisyphus/evidence/task-20-verification.txt",
-      "expiry": ""
+      "expiry": "",
+      "notes": "2026-09-05: log artifacts deleted; JWT_SECRET rotated (all leaked/old tokens dead); AppRole + LLM key + GRADIO creds rotated. MISTRAL_API_KEY+HF_TOKEN await provider-side re-issue (user action)."
     },
     {
       "id": "TRIVY-FS-SECRET-0002",
@@ -766,12 +767,13 @@
       "severity": "MEDIUM",
       "affected_artifact": ".playwright-mcp/console-2026-05-05T08-39-47-458Z.log:line 3",
       "description": "JWT detector match; matched value intentionally omitted",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 20 / Release D",
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-20-verification.txt",
       "evidence_path": ".sisyphus/evidence/task-20-verification.txt",
-      "expiry": ""
+      "expiry": "",
+      "notes": "2026-09-05: log artifacts deleted; JWT_SECRET rotated (all leaked/old tokens dead); AppRole + LLM key + GRADIO creds rotated. MISTRAL_API_KEY+HF_TOKEN await provider-side re-issue (user action)."
     },
     {
       "id": "TRIVY-FS-SECRET-0003",
@@ -780,12 +782,13 @@
       "severity": "MEDIUM",
       "affected_artifact": ".playwright-mcp/console-2026-05-05T08-39-47-458Z.log:line 5",
       "description": "JWT detector match; matched value intentionally omitted",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 20 / Release D",
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-20-verification.txt",
       "evidence_path": ".sisyphus/evidence/task-20-verification.txt",
-      "expiry": ""
+      "expiry": "",
+      "notes": "2026-09-05: log artifacts deleted; JWT_SECRET rotated (all leaked/old tokens dead); AppRole + LLM key + GRADIO creds rotated. MISTRAL_API_KEY+HF_TOKEN await provider-side re-issue (user action)."
     },
     {
       "id": "TRIVY-FS-SECRET-0004",
@@ -14681,8 +14684,8 @@
       "severity": "Unspecified seed",
       "affected_artifact": ".playwright-mcp/*.log",
       "description": "Three local JWT artifacts in ignored .playwright-mcp/*.log",
-      "notes": "Appendix A scanner seed retained alongside normalized exact advisories.",
-      "disposition": "planned",
+      "notes": "2026-09-05: log artifacts deleted; JWT_SECRET rotated (all leaked/old tokens dead); AppRole + LLM key + GRADIO creds rotated. MISTRAL_API_KEY+HF_TOKEN await provider-side re-issue (user action).",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 20 / Release D",
       "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-20-verification.txt",
