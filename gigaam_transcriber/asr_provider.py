@@ -5,13 +5,30 @@ from __future__ import annotations
 import abc
 import asyncio
 import enum
+import inspect
 import logging
 import os
+from collections.abc import Awaitable
 from typing import Any
 
 from .data_models import TranscriptionResult, TranscriptionSegment
 
 logger = logging.getLogger(__name__)
+
+
+async def invoke_provider(provider: Any, method_name: str, *args: Any, **kwargs: Any) -> Any:
+    """Invoke a provider method from async code (the adapter contract).
+
+    Async-native providers (LiteLLM and everything wrapping them, e.g.
+    :class:`FallbackASRProvider`) are ``await``-ed directly on the running
+    event loop — that loop is the only place their ``httpx.AsyncClient`` is
+    ever created, used and closed. Sync providers (Mistral) are executed in a
+    worker thread via :func:`asyncio.to_thread` so the loop is never blocked.
+    """
+    method = getattr(provider, method_name)
+    if inspect.iscoroutinefunction(method):
+        return await method(*args, **kwargs)
+    return await asyncio.to_thread(method, *args, **kwargs)
 
 
 class ASRProvider(str, enum.Enum):
@@ -28,40 +45,49 @@ DEFAULT_ASR_PROVIDER: ASRProvider = ASRProvider.LITELLM
 class ASRProviderBase(abc.ABC):
     """Abstract base for ASR providers.
 
-    Every concrete provider must implement the four async methods below.
+    Every concrete provider must implement the four methods below. The
+    contract is deliberately dual-mode: implementations may be ``async def``
+    (LiteLLM) or plain sync (Mistral), which is why the declared return types
+    are unions of the value and its awaitable — this keeps sync/async
+    overrides type-compatible instead of lying about one of them.
+
+    Callers MUST NOT ``await``/call these methods ad hoc. Dispatch goes
+    through :func:`invoke_provider` (async callers) or the operation-owned
+    ``_ProviderSession`` bridge in ``transcriber.py`` (sync callers) so that a
+    provider's HTTP client never crosses event loops or threads.
     """
 
     @abc.abstractmethod
-    async def transcribe(
+    def transcribe(
         self,
         audio_path: str,
         language: str | None = None,
         diarization: bool = True,
         denoise: bool = False,
-    ) -> str:
+    ) -> str | Awaitable[str]:
         """Transcribe a full audio file. Returns transcribed text."""
 
     @abc.abstractmethod
-    async def transcribe_raw(
+    def transcribe_raw(
         self,
         audio_bytes: bytes,
         filename: str,
         language: str | None = None,
-    ) -> str:
+    ) -> str | Awaitable[str]:
         """Transcribe raw audio bytes (no pre-processing). Returns transcribed text."""
 
     @abc.abstractmethod
-    async def transcribe_segments(
+    def transcribe_segments(
         self,
         audio_path: str,
         segments: list[Any],
         language: str | None = None,
-    ) -> list[TranscriptionSegment]:
+    ) -> list[TranscriptionSegment] | Awaitable[list[TranscriptionSegment]]:
         """Transcribe pre-segmented audio."""
 
     @abc.abstractmethod
-    async def close(self) -> None:
-        """Release HTTP client resources."""
+    def close(self) -> None | Awaitable[None]:
+        """Release HTTP client resources. Must be idempotent (exactly-once)."""
 
 
 class FallbackASRProvider(ASRProviderBase):
@@ -71,10 +97,7 @@ class FallbackASRProvider(ASRProviderBase):
     """
 
     async def _invoke(self, provider, method_name: str, *args, **kwargs):
-        method = getattr(provider, method_name)
-        if asyncio.iscoroutinefunction(method):
-            return await method(*args, **kwargs)
-        return await asyncio.to_thread(method, *args, **kwargs)
+        return await invoke_provider(provider, method_name, *args, **kwargs)
 
     def __init__(
         self,

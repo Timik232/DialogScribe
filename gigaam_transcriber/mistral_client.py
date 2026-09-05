@@ -60,9 +60,17 @@ class MistralASRClient(ASRProviderBase):
         self._max_retries = max(0, int(max_retries))
         self._last_request_time: float = 0.0  # time.monotonic() timestamp
         self._rate_limit_lock = threading.Lock()
+        self._closed = False
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise ASRError("Mistral ASR client is closed")
 
     def close(self) -> None:
-        """Закрыть HTTP-клиент и освободить ресурсы."""
+        """Закрыть HTTP-клиент (идемпотентно, ровно один раз)."""
+        if self._closed:
+            return
+        self._closed = True
         self._client.close()
 
     def _load_audio(self, audio_path: str) -> tuple[Any, int]:
@@ -111,6 +119,7 @@ class MistralASRClient(ASRProviderBase):
 
     def _send_transcription_request(self, wav_bytes: bytes) -> str:
         """Отправить запрос к Mistral API с retry/backoff."""
+        self._ensure_open()
         url = f"{self.asr_url}/v1/audio/transcriptions"
 
         # Проактивное ограничение частоты запросов к API
@@ -238,6 +247,7 @@ class MistralASRClient(ASRProviderBase):
         Returns:
             Transcribed text (may be empty string).
         """
+        self._ensure_open()
         logger.info("ASR transcribe_raw: [path=%s, type=%s]", audio_path, content_type)
 
         with open(audio_path, "rb") as f:

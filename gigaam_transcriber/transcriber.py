@@ -10,8 +10,12 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import contextlib
+import inspect
 import logging
 import os
+import threading
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -41,14 +45,223 @@ logger = logging.getLogger(__name__)
 CHUNK_THRESHOLD_SEC = 1800.0
 CHUNK_DURATION_SEC = 300.0
 
+_TRANSCRIPTION_MAX_CONCURRENT_DEFAULT = 2
+_CHUNK_CONCURRENCY_DEFAULT = 3
 
-def _call_provider(provider: Any, method_name: str, *args: Any, **kwargs: Any) -> Any:
-    """Call a provider method, handling both sync and async implementations."""
-    method = getattr(provider, method_name)
-    result = method(*args, **kwargs)
-    if asyncio.iscoroutine(result):
-        return asyncio.run(result)
-    return result
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logger.warning("Некорректное %s=%r, используется значение по умолчанию %d", name, raw, default)
+        return default
+
+
+class _TranscriptionLimiter:
+    """Process-wide bound on concurrent transcription work.
+
+    Every ``GigaAMTranscriber.transcribe`` operation acquires one slot for its
+    whole duration, so concurrent requests × chunk workers can no longer
+    explode into an unbounded number of GPU/ASR jobs.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = max(1, int(limit))
+        self._sem = threading.BoundedSemaphore(self.limit)
+        self._lock = threading.Lock()
+        self._active = 0
+        self._peak = 0
+
+    @contextlib.contextmanager
+    def slot(self):
+        self._sem.acquire()
+        try:
+            with self._lock:
+                self._active += 1
+                self._peak = max(self._peak, self._active)
+            try:
+                yield
+            finally:
+                with self._lock:
+                    self._active -= 1
+        finally:
+            self._sem.release()
+
+    def stats(self) -> tuple[int, int]:
+        """(active, peak) slot usage — observability for tests/evidence."""
+        with self._lock:
+            return self._active, self._peak
+
+    def reset_stats(self) -> None:
+        with self._lock:
+            self._active = 0
+            self._peak = 0
+
+
+_TRANSCRIPTION_LIMITER = _TranscriptionLimiter(
+    _env_int("TRANSCRIPTION_MAX_CONCURRENT", _TRANSCRIPTION_MAX_CONCURRENT_DEFAULT),
+)
+ASR_CHUNK_CONCURRENCY = _env_int("ASR_CHUNK_CONCURRENCY", _CHUNK_CONCURRENCY_DEFAULT)
+
+
+class _ProviderSession:
+    """Sync↔async bridge owning ONE provider for ONE transcription operation.
+
+    Contract (fixes CQ-H2 — the shared AsyncClient crossing loops/threads):
+
+    - Async-native providers (LiteLLM, FallbackASRProvider) execute every
+      method on a single dedicated event loop owned by this session. That loop
+      is the only place the provider's ``httpx.AsyncClient`` is created, used
+      and closed, so a client never crosses loops or worker threads.
+    - Sync providers (Mistral) are called directly on the calling thread, and
+      via ``asyncio.to_thread`` when reached through async dispatch.
+    - Chunk fan-out runs under a bounded semaphore (async providers) or a
+      bounded ThreadPoolExecutor (sync providers); result order is preserved.
+    - ``close()`` runs exactly once — even on failure or cancellation — and
+      swallows provider close errors so the original error survives.
+    """
+
+    def __init__(self, provider: Any) -> None:
+        self._provider = provider
+        self._is_async = inspect.iscoroutinefunction(getattr(provider, "transcribe", None))
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop_thread: Optional[threading.Thread] = None
+        self._cancelled = threading.Event()
+        self._closed = False
+
+    def __enter__(self) -> "_ProviderSession":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
+
+    def _ensure_loop(self) -> asyncio.AbstractEventLoop:
+        if self._loop is None:
+            loop = asyncio.new_event_loop()
+            thread = threading.Thread(
+                target=loop.run_forever,
+                name="asr-provider-loop",
+                daemon=True,
+            )
+            thread.start()
+            self._loop, self._loop_thread = loop, thread
+        return self._loop
+
+    def _run_coro(self, coro: Any) -> Any:
+        loop = self._ensure_loop()
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        try:
+            return future.result()
+        except concurrent.futures.CancelledError as exc:
+            raise asyncio.CancelledError() from exc
+        except BaseException:
+            self._cancelled.set()
+            raise
+
+    def call(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
+        """Invoke a provider method synchronously from any thread."""
+        method = getattr(self._provider, method_name)
+        if self._is_async:
+            return self._run_coro(method(*args, **kwargs))
+        result = method(*args, **kwargs)
+        if asyncio.iscoroutine(result):
+            return self._run_coro(result)
+        return result
+
+    def gather(
+        self,
+        method_name: str,
+        arg_sets: List[tuple],
+        *,
+        kwargs: Optional[Dict[str, Any]] = None,
+        limit: Optional[int] = None,
+    ) -> List[Any]:
+        """Run one provider method over many argument sets; order preserved."""
+        kwargs = kwargs or {}
+        if not arg_sets:
+            return []
+        limit = max(1, int(limit if limit is not None else ASR_CHUNK_CONCURRENCY))
+        if not self._is_async:
+            method = getattr(self._provider, method_name)
+            with ThreadPoolExecutor(
+                max_workers=limit, thread_name_prefix="asr-chunk",
+            ) as executor:
+                futures = [executor.submit(method, *args, **kwargs) for args in arg_sets]
+                return [future.result() for future in futures]
+        return self._run_coro(self._gather_async(method_name, arg_sets, kwargs, limit))
+
+    async def _gather_async(
+        self,
+        method_name: str,
+        arg_sets: List[tuple],
+        kwargs: Dict[str, Any],
+        limit: int,
+    ) -> List[Any]:
+        method = getattr(self._provider, method_name)
+        semaphore = asyncio.Semaphore(limit)
+
+        async def _one(args: tuple) -> Any:
+            if self._cancelled.is_set():
+                raise asyncio.CancelledError()
+            async with semaphore:
+                return await method(*args, **kwargs)
+
+        tasks = [asyncio.create_task(_one(args)) for args in arg_sets]
+        try:
+            return list(await asyncio.gather(*tasks))
+        except BaseException:
+            self._cancelled.set()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
+    def cancel(self) -> None:
+        """Cooperatively cancel queued work; in-flight requests still finish."""
+        self._cancelled.set()
+
+    def close(self) -> None:
+        """Close the provider exactly once and shut its owning loop down."""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            method = getattr(self._provider, "close", None)
+            if method is None:
+                return
+            if inspect.iscoroutinefunction(method):
+                if self._loop is not None and self._loop.is_running():
+                    future = asyncio.run_coroutine_threadsafe(method(), self._loop)
+                    future.result(timeout=30)
+                else:
+                    asyncio.run(method())
+            else:
+                method()
+        except Exception:
+            logger.debug("Не удалось закрыть ASR-провайдер", exc_info=True)
+        finally:
+            self._shutdown_loop()
+
+    def _shutdown_loop(self) -> None:
+        loop, thread = self._loop, self._loop_thread
+        self._loop = self._loop_thread = None
+        if loop is None:
+            return
+        try:
+            loop.call_soon_threadsafe(loop.stop)
+        except RuntimeError:
+            pass
+        if thread is not None:
+            thread.join(timeout=10)
+        if not loop.is_running() and not loop.is_closed():
+            try:
+                loop.close()
+            except RuntimeError:
+                pass
 
 
 class GigaAMTranscriber:
@@ -87,6 +300,7 @@ class GigaAMTranscriber:
 
         self._audio_processor: Optional[AudioProcessor] = None
         self._diarization_manager: Optional[DiarizationManager] = None
+        self._cleaned = False
 
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -123,8 +337,38 @@ class GigaAMTranscriber:
         self.cleanup()
 
     def cleanup(self) -> None:
-        """Освобождение ресурсов."""
-        logger.info("Ресурсы освобождены")
+        """Освобождение ресурсов (идемпотентно, допустим повторный вызов).
+
+        ASR-провайдеры живут ровно одну операцию и закрываются их
+        ``_ProviderSession``; временные чанки удаляются в finally каждого
+        пути транскрипции. Здесь освобождаются лениво загруженные модели:
+        менеджер диаризации (pyannote/GPU) и аудио-процессор.
+        """
+        if getattr(self, "_cleaned", False):
+            return
+        self._cleaned = True
+        released: List[str] = []
+        if self._diarization_manager is not None:
+            self._diarization_manager = None
+            released.append("diarization_manager")
+            self._release_cuda_memory()
+        if self._audio_processor is not None:
+            self._audio_processor = None
+            released.append("audio_processor")
+        logger.info(
+            "Ресурсы освобождены: %s",
+            ", ".join(released) if released else "нечего освобождать",
+        )
+
+    @staticmethod
+    def _release_cuda_memory() -> None:
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            logger.debug("Очистка CUDA-кэша пропущена", exc_info=True)
 
     def _validate_input(self, path: Path) -> None:
         """Валидация входного файла."""
@@ -213,11 +457,11 @@ class GigaAMTranscriber:
         }
 
         provider = get_asr_provider(provider_preference)
-        try:
+        with _ProviderSession(provider) as session, _TRANSCRIPTION_LIMITER.slot():
             if self.audio_processor.is_video_file(input_path):
                 result = self._transcribe_video(
                     input_path,
-                    provider=provider,
+                    session=session,
                     diarization=diarization,
                     keep_temp_audio=False,
                     denoise=denoise,
@@ -227,14 +471,12 @@ class GigaAMTranscriber:
             else:
                 result = self._transcribe_audio(
                     input_path,
-                    provider=provider,
+                    session=session,
                     diarization=diarization,
                     denoise=denoise,
                     language=language,
                     **diarization_kwargs,
                 )
-        finally:
-            _call_provider(provider, "close")
 
         if merge_same_speaker and result.segments:
             merger = SegmentMerger(MergeConfig(max_gap=min_segment_gap))
@@ -267,7 +509,7 @@ class GigaAMTranscriber:
         self,
         audio_path: Path,
         *,
-        provider: Any,
+        session: _ProviderSession,
         diarization: DiarizationMode = "none",
         denoise: str = "none",
         language: str = "ru",
@@ -288,11 +530,11 @@ class GigaAMTranscriber:
             if diarization == "none":
                 if duration >= self.chunk_threshold:
                     text = self._transcribe_chunked(
-                        working_audio, duration, provider=provider, **asr_kwargs,
+                        working_audio, duration, session=session, **asr_kwargs,
                     )
                 else:
-                    text = _call_provider(
-                        provider, "transcribe", str(working_audio), **asr_kwargs,
+                    text = session.call(
+                        "transcribe", str(working_audio), **asr_kwargs,
                     ).strip()
                 if not text:
                     raise EmptyAudioError(str(audio_path))
@@ -316,8 +558,8 @@ class GigaAMTranscriber:
                     {"start": seg.start, "end": seg.end, "speaker": seg.speaker}
                     for seg in speaker_segments
                 ]
-                api_segments = _call_provider(
-                    provider, "transcribe_segments", str(working_audio), segment_dicts,
+                api_segments = session.call(
+                    "transcribe_segments", str(working_audio), segment_dicts,
                     language=language,
                 )
                 segments = [
@@ -355,33 +597,23 @@ class GigaAMTranscriber:
         audio_path: Path,
         duration: float,
         *,
-        provider: Any,
+        session: _ProviderSession,
         **asr_kwargs: Any,
     ) -> str:
+        _ = duration
         chunks = self.audio_processor.split_audio(
             audio_path,
             chunk_duration=self.chunk_duration,
         )
         chunk_files = [chunk[0] for chunk in chunks]
         try:
-
-            def _transcribe_one(idx: int, chunk_path: Path) -> tuple[int, str]:
-                text = _call_provider(provider, "transcribe", str(chunk_path), **asr_kwargs)
-                return idx, text.strip() if text else ""
-
-            texts: List[tuple[int, str]] = []
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                futures = {
-                    executor.submit(_transcribe_one, i, path): i
-                    for i, path in enumerate(chunk_files)
-                }
-                for future in as_completed(futures):
-                    idx, text = future.result()
-                    if text:
-                        texts.append((idx, text))
-
-            texts.sort(key=lambda x: x[0])
-            return " ".join(text for _, text in texts)
+            texts = session.gather(
+                "transcribe",
+                [(str(path),) for path in chunk_files],
+                kwargs=asr_kwargs,
+            )
+            cleaned = [text.strip() if text else "" for text in texts]
+            return " ".join(text for text in cleaned if text)
         finally:
             for chunk_file in chunk_files:
                 try:
@@ -393,7 +625,7 @@ class GigaAMTranscriber:
         self,
         video_path: Path,
         *,
-        provider: Any,
+        session: _ProviderSession,
         keep_temp_audio: bool = False,
         **kwargs: Any,
     ) -> TranscriptionResult:
@@ -406,7 +638,7 @@ class GigaAMTranscriber:
                 normalize=True,
             )
 
-            result = self._transcribe_audio(temp_audio, provider=provider, denoise=denoise, **kwargs)
+            result = self._transcribe_audio(temp_audio, session=session, denoise=denoise, **kwargs)
             result.metadata["source"] = str(video_path)
             result.metadata["source_type"] = "video"
             return result
