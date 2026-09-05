@@ -100,11 +100,11 @@
       "severity": "High",
       "affected_artifact": "gigaam_transcriber/diarization.py",
       "description": "Hybrid diarization labels filtered embeddings against unfiltered segments, shifting speakers",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 16 / Release C",
-      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-16-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-16-verification.txt",
+      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && HOME=/tmp PYTHONUSERBASE=/home/ser13volk/.local JWT_SECRET=ci-test-only python -m pytest -q tests/test_diarization_alignment_cache.py tests/test_segment_merger.py -p no:cacheprovider",
+      "evidence_path": ".sisyphus/evidence/task-16-diarization-alignment.txt; .sisyphus/evidence/task-16-diarization-cache.txt",
       "expiry": ""
     },
     {
@@ -356,11 +356,11 @@
       "severity": "Medium",
       "affected_artifact": "diarization.py",
       "description": "Hybrid model cache is instance-local while module globals are unused, reloading models per request",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 16 / Release C",
-      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-16-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-16-verification.txt",
+      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && HOME=/tmp PYTHONUSERBASE=/home/ser13volk/.local JWT_SECRET=ci-test-only python -m pytest -q tests/test_diarization_alignment_cache.py tests/test_segment_merger.py -p no:cacheprovider",
+      "evidence_path": ".sisyphus/evidence/task-16-diarization-alignment.txt; .sisyphus/evidence/task-16-diarization-cache.txt",
       "expiry": ""
     },
     {
