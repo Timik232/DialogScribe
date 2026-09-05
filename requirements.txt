@@ -1,11 +1,27 @@
 httpx>=0.24
 numpy>=1.24
 soundfile>=0.12
-torch==2.8.0
-torchaudio==2.8.0
-torchcodec==0.7.0
-pyannote.audio>=3.1.0,<4.0.0
-speechbrain>=1.0.0
+# ML tuple — upgraded as ONE unit (Task 19):
+#   torch 2.14.0 clears CVE-2025-2999 (>=2.9.1) / CVE-2025-3001 (>=2.10.0) /
+#   CVE-2025-3000 (>=2.13.0); official PyPI manylinux wheels (CUDA via nvidia-* deps).
+#   torchaudio >=2.9 is a thin torchcodec-backed wrapper (no torch pin in metadata);
+#   torchcodec declares no torch dep by design (CUDA-variant freedom).
+#   pyannote.audio stays 3.x — 4.x is a major migration with telemetry deps.
+#   lightning pinned at latest 2.6.5; compromised 2.6.2/2.6.3 excluded and
+#   CVE-2026-58659 has no released fix (commit d710d68 unreleased) — see
+#   audit matrix row TRIVY-IMG-VULN-0737 (accepted: no Lightning checkpoint
+#   loading path exists in this service; only pinned public HF revisions are
+#   loaded, via pyannote/speechbrain loaders, never via LightningModule).
+# Trusted model sources (never load untrusted checkpoints):
+#   pyannote/speaker-diarization-3.1, speechbrain/spkrec-ecapa-voxceleb —
+#   exact revisions resolved during Task 19 validation are recorded in
+#   .sisyphus/evidence/task-19-dependency-compatibility.txt
+torch==2.14.0
+torchaudio==2.11.0
+torchcodec==0.16.0
+pyannote.audio>=3.4.0,<4.0.0
+speechbrain==1.1.1
+lightning==2.6.5
 scikit-learn>=1.3.0
 huggingface_hub>=0.23.0
 ffmpeg-python>=0.2.0

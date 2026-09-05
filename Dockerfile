@@ -12,7 +12,7 @@ RUN npm run build
 # Stage 2: Python runtime (production)
 FROM python@sha256:fd76ade0c607f27677bc04be3c60749f400eedc941d9e72967e19a4cedff80c2
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libpango-1.0-0 \
     libpangocairo-1.0-0 \
@@ -50,6 +50,11 @@ RUN groupadd -g 10003 secrets \
 # under /home/appuser/.cache — mount a named volume on the whole directory so
 # warm caches survive restarts and enable offline start.
 ENV HF_HOME=/home/appuser/.cache/huggingface
+# torch>=2.6 defaults weights_only=True which rejects the pickled
+# TorchVersion/task-spec globals inside the trusted pinned public model
+# revisions (pyannote/speaker-diarization-3.1, speechbrain/spkrec-ecapa-
+# voxceleb); see diarization.py loaders — never load untrusted checkpoints.
+ENV TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 USER 10001
 
 EXPOSE 7860
