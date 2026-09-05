@@ -77,6 +77,30 @@ app = FastAPI(
     openapi_url="/openapi.json" if _DOCS_ENABLED else None,
 )
 
+# Defense-in-depth browser hardening for every response (SPA included):
+# scripts/styles/images only from same origin, no plugins/frames, and no
+# content-type sniffing. WebSocket upgrades are allowed for the live APIs.
+_SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self' ws: wss:; "
+        "object-src 'none'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+}
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.update(_SECURITY_HEADERS)
+    return response
+
 
 @app.get("/health")
 def health():

@@ -139,6 +139,41 @@ class TestMindmapTombstone:
         )
 
 
+class TestSecurityHeaders:
+    """CSP + nosniff hardening must be present on SPA and API responses."""
+
+    def test_spa_index_has_security_headers(self, client, fake_build):
+        resp = client.get("/")
+        assert resp.status_code == 200
+        csp = resp.headers["content-security-policy"]
+        assert "script-src 'self'" in csp
+        assert "object-src 'none'" in csp
+        assert "frame-ancestors 'none'" in csp
+        assert "base-uri 'self'" in csp
+        assert "connect-src 'self' ws: wss:" in csp
+        assert resp.headers["x-content-type-options"] == "nosniff"
+
+    def test_client_route_fallback_has_security_headers(self, client, fake_build):
+        resp = client.get("/analysis")
+        assert resp.status_code == 200
+        assert "script-src 'self'" in resp.headers["content-security-policy"]
+        assert resp.headers["x-content-type-options"] == "nosniff"
+
+    def test_api_json_response_has_security_headers(self, client):
+        resp = client.get("/mindmap/anything")
+        assert resp.status_code == 410
+        assert "script-src 'self'" in resp.headers["content-security-policy"]
+        assert resp.headers["x-content-type-options"] == "nosniff"
+
+    def test_csp_forbids_inline_scripts(self, client, fake_build):
+        csp = client.get("/").headers["content-security-policy"]
+        script_src = next(
+            directive for directive in csp.split(";") if directive.strip().startswith("script-src")
+        )
+        assert "unsafe-inline" not in script_src
+        assert "unsafe-eval" not in script_src
+
+
 class TestDocsGating:
     def test_docs_disabled_by_default(self, client, no_build):
         for path in ("/docs", "/redoc", "/openapi.json"):
