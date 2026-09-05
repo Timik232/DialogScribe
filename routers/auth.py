@@ -22,6 +22,7 @@ from gigaam_transcriber.auth import (
 from gigaam_transcriber.database import get_db
 from gigaam_transcriber.email import send_password_reset_email
 from gigaam_transcriber.models import User
+from gigaam_transcriber.rate_limit import ip_rate_limit
 from gigaam_transcriber.sessions import (
     create_refresh_session,
     get_refresh_session,
@@ -117,7 +118,7 @@ class ResetPasswordRequest(BaseModel):
     new_password: str = Field(min_length=8)
 
 
-@auth_router.post("/register", status_code=status.HTTP_201_CREATED)
+@auth_router.post("/register", status_code=status.HTTP_201_CREATED, dependencies=[Depends(ip_rate_limit("register"))])
 async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
     if not EMAIL_REGEX.match(body.email):
         raise HTTPException(status_code=422, detail="Invalid email format")
@@ -144,7 +145,7 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
     return {"user_id": user.id, "username": user.username, "email": user.email}
 
 
-@auth_router.post("/login", response_model=TokenResponse)
+@auth_router.post("/login", response_model=TokenResponse, dependencies=[Depends(ip_rate_limit("login"))])
 async def login(
     body: LoginRequest,
     request: Request,
@@ -187,7 +188,7 @@ async def login(
     return TokenResponse(access_token=access_token)
 
 
-@auth_router.post("/refresh", response_model=TokenResponse)
+@auth_router.post("/refresh", response_model=TokenResponse, dependencies=[Depends(ip_rate_limit("refresh"))])
 async def refresh(
     request: Request,
     response: Response,
@@ -280,7 +281,7 @@ async def get_me(user: User = Depends(get_current_user)):
     )
 
 
-@auth_router.post("/forgot-password")
+@auth_router.post("/forgot-password", dependencies=[Depends(ip_rate_limit("forgot_password"))])
 async def forgot_password(body: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
     GENERIC_MSG = "Если аккаунт с таким email существует, мы отправили ссылку для сброса пароля"
 
@@ -305,7 +306,7 @@ async def forgot_password(body: ForgotPasswordRequest, db: AsyncSession = Depend
     return {"message": GENERIC_MSG}
 
 
-@auth_router.post("/reset-password")
+@auth_router.post("/reset-password", dependencies=[Depends(ip_rate_limit("reset_password"))])
 async def reset_password(body: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
     token_hash = hashlib.sha256(body.token.encode()).hexdigest()
 

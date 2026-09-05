@@ -15,6 +15,7 @@ from gigaam_transcriber.data_models import TranscriptionResult
 from gigaam_transcriber.database import get_db
 from gigaam_transcriber.models import User, UserSettings
 from gigaam_transcriber.limits import check_limit
+from gigaam_transcriber.rate_limit import user_rate_limit
 from gigaam_transcriber.usage import track_usage
 
 from routers._helpers import (
@@ -104,7 +105,7 @@ def _transcribe_upload(
             logger.warning("Failed to remove temp file: %s", tmp_path)
 
 
-@router.post("/transcribe")
+@router.post("/transcribe", dependencies=[Depends(user_rate_limit("upload"))])
 async def transcribe(
     request: Request,
     file: Annotated[UploadFile, File()],
@@ -130,7 +131,7 @@ async def transcribe(
     return result
 
 
-@router.post("/transcribe/microphone")
+@router.post("/transcribe/microphone", dependencies=[Depends(user_rate_limit("upload"))])
 async def transcribe_microphone(
     request: Request,
     file: Annotated[UploadFile, File()],

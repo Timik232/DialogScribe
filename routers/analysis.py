@@ -17,6 +17,7 @@ from gigaam_transcriber.summarizer import (
 )
 from gigaam_transcriber.limits import check_limit
 from gigaam_transcriber.models import User
+from gigaam_transcriber.rate_limit import user_rate_limit
 from gigaam_transcriber.usage import track_usage
 
 from routers._helpers import logger
@@ -134,7 +135,7 @@ async def post_insights(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@router.post("/chat")
+@router.post("/chat", dependencies=[Depends(user_rate_limit("chat"))])
 async def post_chat(
     body: ChatRequest,
     user: User = Depends(get_current_user),

@@ -16,6 +16,7 @@ from gigaam_transcriber import GigaAMTranscriber
 from gigaam_transcriber.audio_processor import AudioProcessor
 from gigaam_transcriber.data_models import TranscriptionResult
 from gigaam_transcriber.auth import bootstrap_admin, get_current_user
+from gigaam_transcriber.rate_limit import ip_rate_limit
 from gigaam_transcriber.settings import is_development
 from gigaam_transcriber.utils import setup_logging
 from gigaam_transcriber.database import async_session_factory
@@ -150,6 +151,7 @@ def health():
 def create_transcription(
     file: Annotated[UploadFile, File()],
     auth: Annotated[None, Depends(_verify_auth)],
+    _rate_limit: Annotated[None, Depends(ip_rate_limit("v1_transcription"))],
     model: Annotated[str, Form()] = "whisper-1",
     language: Annotated[str | None, Form()] = None,
     response_format: Annotated[str, Form()] = "json",
