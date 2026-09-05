@@ -9,22 +9,17 @@ function getAccessToken(): string {
 	return token;
 }
 
-async function refreshAndGetToken(): Promise<string | null> {
-	const newToken = await authStore.refresh();
-	return newToken;
-}
-
-export async function fetchApi<T = unknown>(
+async function fetchWithRefresh(
 	method: string,
 	path: string,
-	options: FetchOptions = {}
-): Promise<T> {
+	options: FetchOptions
+): Promise<Response> {
 	const { skipAuthRedirect, ...init } = options;
 
-	const token = getAccessToken();
 	const headers: Record<string, string> = {
 		...(init.headers as Record<string, string>),
 	};
+	const token = getAccessToken();
 	if (token) {
 		headers["Authorization"] = `Bearer ${token}`;
 	}
@@ -37,7 +32,7 @@ export async function fetchApi<T = unknown>(
 	});
 
 	if (res.status === 401 && token && !skipAuthRedirect) {
-		const newToken = await refreshAndGetToken();
+		const newToken = await authStore.refresh();
 		if (newToken) {
 			headers["Authorization"] = `Bearer ${newToken}`;
 			res = await fetch(path, { ...init, method, headers, credentials: "include" });
@@ -50,9 +45,31 @@ export async function fetchApi<T = unknown>(
 		throw new Error("Unauthorized");
 	}
 
+	return res;
+}
+
+function extractApiError(status: number, text: string): Error {
+	try {
+		const detail = JSON.parse(text)?.detail?.error;
+		if (detail?.message) {
+			return new Error(detail.message);
+		}
+	} catch {
+		return new Error(`API error ${status}: ${text}`);
+	}
+	return new Error(`API error ${status}: ${text}`);
+}
+
+export async function fetchApi<T = unknown>(
+	method: string,
+	path: string,
+	options: FetchOptions = {}
+): Promise<T> {
+	const res = await fetchWithRefresh(method, path, options);
+
 	if (!res.ok) {
 		const text = await res.text().catch(() => "");
-		throw new Error(`API ${method} ${path} failed: ${res.status} ${text}`);
+		throw extractApiError(res.status, text);
 	}
 
 	const contentType = res.headers.get("content-type");
@@ -69,36 +86,7 @@ export async function fetchApiBlob(
 	path: string,
 	options: FetchOptions = {}
 ): Promise<Blob> {
-	const { skipAuthRedirect, ...init } = options;
-
-	const token = getAccessToken();
-	const headers: Record<string, string> = {
-		...(init.headers as Record<string, string>),
-	};
-	if (token) {
-		headers["Authorization"] = `Bearer ${token}`;
-	}
-
-	let res = await fetch(path, {
-		...init,
-		method,
-		headers,
-		credentials: "include",
-	});
-
-	if (res.status === 401 && token && !skipAuthRedirect) {
-		const newToken = await refreshAndGetToken();
-		if (newToken) {
-			headers["Authorization"] = `Bearer ${newToken}`;
-			res = await fetch(path, { ...init, method, headers, credentials: "include" });
-		}
-	}
-
-	if (res.status === 401 && !skipAuthRedirect) {
-		const return_url = window.location.pathname + window.location.search;
-		goto(`/login?return_url=${encodeURIComponent(return_url)}`);
-		throw new Error("Unauthorized");
-	}
+	const res = await fetchWithRefresh(method, path, options);
 
 	if (!res.ok) {
 		throw new Error(`API ${method} ${path} failed: ${res.status}`);
