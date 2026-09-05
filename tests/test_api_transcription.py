@@ -112,7 +112,7 @@ class TestTranscribe:
     def test_file_too_large(self, client):
         c, _ = client
 
-        with patch("routers.transcription.MAX_UPLOAD_SIZE_MB", 0):
+        with patch("routers._uploads.max_upload_bytes", return_value=0):
             resp = c.post(
                 "/api/transcribe",
                 files=[("file", ("big.wav", io.BytesIO(b"x" * 1024), "audio/wav"))],

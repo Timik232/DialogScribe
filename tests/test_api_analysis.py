@@ -333,6 +333,7 @@ class TestChat:
 
         with (
             patch("routers.analysis.llm_client", mock_llm),
+            patch("routers.analysis.get_available_models", return_value=["gpt-4", "glm-5-turbo"]),
             patch("routers.analysis.chat_with_transcript", return_value={"answer": "Ответ"}),
         ):
             resp = client.post(

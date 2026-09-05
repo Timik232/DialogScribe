@@ -1,8 +1,8 @@
+import asyncio
 import json
 import logging
 import os
 import re
-import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, cast
@@ -13,8 +13,6 @@ from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gigaam_transcriber import GigaAMTranscriber
-from gigaam_transcriber.audio_processor import AudioProcessor
-from gigaam_transcriber.data_models import TranscriptionResult
 from gigaam_transcriber.auth import bootstrap_admin, get_current_user
 from gigaam_transcriber.rate_limit import ip_rate_limit
 from gigaam_transcriber.settings import is_development
@@ -23,15 +21,18 @@ from gigaam_transcriber.database import async_session_factory
 from gigaam_transcriber.models import User
 
 from routers._helpers import (
-    SUPPORTED_EXTENSIONS,
     _handle_transcription_exception,
     _map_format,
-    _openai_error,
     _result_response,
     _verify_auth,
 )
+from routers._uploads import (
+    BodySizeLimitMiddleware,
+    openai_error_detail,
+    spool_upload,
+    sweep_stale_tempfiles,
+)
 
-MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "1024"))
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "7860"))
 
@@ -55,6 +56,10 @@ async def lifespan(app: FastAPI):
     app.state.transcriber = transcriber
     logger.info("DialogScribe API starting — transcriber initialized")
 
+    swept = await asyncio.to_thread(sweep_stale_tempfiles)
+    if swept:
+        logger.info("Startup sweep removed %d stale upload temp files", swept)
+
     # Bootstrap admin user from ADMIN_EMAIL / ADMIN_PASSWORD env vars
     async with async_session_factory() as db:
         try:
@@ -74,6 +79,10 @@ app = FastAPI(
     redoc_url="/redoc" if _DOCS_ENABLED else None,
     openapi_url="/openapi.json" if _DOCS_ENABLED else None,
 )
+
+# Registered before the security-headers decorator so the raw-body 413
+# responses still flow outward through it (and keep CSP headers).
+app.add_middleware(BodySizeLimitMiddleware)
 
 # Defense-in-depth browser hardening for every response (SPA included):
 # scripts/styles/images only from same origin, no plugins/frames, and no
@@ -157,60 +166,20 @@ def create_transcription(
     response_format: Annotated[str, Form()] = "json",
 ) -> Response:
     _ = model, auth
-    filename = file.filename or ""
-    file_ext = Path(filename).suffix.lower()
-
-    if file_ext not in SUPPORTED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=_openai_error(
-                f"Unsupported file format: '{file_ext or 'unknown'}'",
-                "invalid_request_error",
-                400,
-            ),
-        )
-
-    max_size_bytes = MAX_UPLOAD_SIZE_MB * 1024 * 1024
-    tmp_path: str | None = None
-
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
-            tmp_path = tmp_file.name
-            size = 0
-            while True:
-                chunk = file.file.read(1024 * 1024)
-                if not chunk:
-                    break
-                size += len(chunk)
-                if size > max_size_bytes:
-                    raise HTTPException(
-                        status_code=413,
-                        detail=_openai_error(
-                            f"File too large. Maximum allowed is {MAX_UPLOAD_SIZE_MB}MB",
-                            "invalid_request_error",
-                            413,
-                        ),
-                    )
-                _ = tmp_file.write(chunk)
-
-        transcriber = cast(GigaAMTranscriber, app.state.transcriber)
-        result: TranscriptionResult = transcriber.transcribe(
-            input_path=tmp_path,
-            diarization="none",
-            language=language or "ru",
-            output_format=_map_format(response_format),
-        )
-        return _result_response(result, response_format)
+        with spool_upload(file, error_detail=openai_error_detail) as tmp_path:
+            transcriber = cast(GigaAMTranscriber, app.state.transcriber)
+            result = transcriber.transcribe(
+                input_path=tmp_path,
+                diarization="none",
+                language=language or "ru",
+                output_format=_map_format(response_format),
+            )
+            return _result_response(result, response_format)
     except HTTPException:
         raise
     except Exception as e:
         raise _handle_transcription_exception(e)
-    finally:
-        try:
-            if tmp_path and os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-        except Exception:
-            logger.warning("Failed to remove temp file: %s", tmp_path)
 
 
 from routers import admin, analysis, autoflow, exports, live_hints, meeting_prep, saved_transcriptions, templates, transcription, usage  # noqa: E402

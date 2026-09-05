@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gigaam_transcriber.auth import get_current_user
@@ -26,6 +26,11 @@ router = APIRouter(prefix="/api", tags=["analysis"])
 
 llm_client = LLMClient()
 
+MAX_CHAT_CONTEXT_CHARS = 2_000_000
+MAX_CHAT_MESSAGE_CHARS = 32_768
+MAX_CHAT_MESSAGES = 200
+MAX_MODEL_NAME_CHARS = 100
+
 
 class SummaryRequest(BaseModel):
     text: str
@@ -46,14 +51,14 @@ class InsightsRequest(BaseModel):
 
 
 class ChatMessage(BaseModel):
-    role: str
-    content: str
+    role: str = Field(max_length=64)
+    content: str = Field(max_length=MAX_CHAT_MESSAGE_CHARS)
 
 
 class ChatRequest(BaseModel):
-    text: str
-    model: str | None = None
-    messages: list[ChatMessage]
+    text: str = Field(max_length=MAX_CHAT_CONTEXT_CHARS)
+    model: str | None = Field(default=None, max_length=MAX_MODEL_NAME_CHARS)
+    messages: list[ChatMessage] = Field(max_length=MAX_CHAT_MESSAGES)
 
 
 def _ensure_llm() -> None:
@@ -61,6 +66,19 @@ def _ensure_llm() -> None:
         raise HTTPException(
             status_code=503,
             detail="LLM_API_KEY not configured",
+        )
+
+
+def _validate_chat_model(model: str | None) -> None:
+    if model is None:
+        return
+    if not model.strip() or model != model.strip():
+        raise HTTPException(status_code=400, detail="Invalid model identifier")
+    allowed = get_available_models()
+    if model not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model '{model}' is not available on this server",
         )
 
 
@@ -141,6 +159,7 @@ async def post_chat(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
+    _validate_chat_model(body.model)
     _ensure_llm()
     await check_limit(db, user.id, "llm_call")
 
