@@ -3,9 +3,14 @@
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import cast
+
+STALE_SHELL_ASSIGNMENT = re.compile(
+    r"^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*=", re.MULTILINE
+)
 
 ALLOWLIST = {
     "DATABASE_URL", "JWT_SECRET", "API_KEY", "V1_API_ENABLED", "ENVIRONMENT",
@@ -31,9 +36,21 @@ def main() -> int:
         print("entrypoint secrets: secrets file is missing", file=sys.stderr)
         return 1
     try:
-        data = cast(object, json.loads(path.read_text(encoding="utf-8")))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
         print("entrypoint secrets: secrets file is not valid JSON", file=sys.stderr)
+        return 1
+    try:
+        data = cast(object, json.loads(raw))
+    except json.JSONDecodeError:
+        if STALE_SHELL_ASSIGNMENT.search(raw):
+            print(
+                "entrypoint secrets: stale shell-format secrets file — "
+                "Vault template must render JSON",
+                file=sys.stderr,
+            )
+        else:
+            print("entrypoint secrets: secrets file is not valid JSON", file=sys.stderr)
         return 1
     if not isinstance(data, dict):
         print("entrypoint secrets: secrets JSON must be an object", file=sys.stderr)
