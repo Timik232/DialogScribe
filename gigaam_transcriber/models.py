@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, Column, DateTime, Float, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from gigaam_transcriber.asr_provider import DEFAULT_ASR_PROVIDER
@@ -131,19 +131,8 @@ class SavedTranscription(Base):
     user = relationship("User", backref="saved_transcriptions")
 
 
-class MeetingPrepPlan(Base):
-    __tablename__ = "meeting_prep_plans"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    company_data: Mapped[str] = mapped_column(Text, nullable=False)
-    catalog_data: Mapped[str] = mapped_column(Text, nullable=False)
-    result_markdown: Mapped[str] = mapped_column(Text, nullable=False)
-    model_used: Mapped[str] = mapped_column(String(100), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
-
-    user = relationship("User", backref="meeting_prep_plans")
-
+# NOTE: the meeting_prep_plans table (migration 007) has no ORM mapping —
+# meeting-prep results are computed per request and never persisted.
 
 class UserSettings(Base):
     __tablename__ = "user_settings"

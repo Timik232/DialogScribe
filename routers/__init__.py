@@ -1,1 +1,1 @@
-from routers import analysis, autoflow, exports, templates, transcription
+"""FastAPI routers; import submodules directly (from routers import analysis)."""
