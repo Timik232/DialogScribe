@@ -5,7 +5,7 @@ import secrets
 import uuid
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,12 +30,15 @@ from gigaam_transcriber.sessions import (
     revoke_refresh_chain,
     rotate_refresh_session,
 )
+from gigaam_transcriber.settings import is_development
 
 auth_router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
 
 REFRESH_COOKIE_MAX_AGE = REFRESH_TOKEN_EXPIRE_DAYS * 24 * 3600
+CSRF_COOKIE_NAME = "csrf_token"
+CSRF_HEADER_NAME = "x-csrf-token"
 
 
 def _client_ip(request: Request) -> str | None:
@@ -43,6 +46,43 @@ def _client_ip(request: Request) -> str | None:
     if forwarded:
         return forwarded.split(",")[0].strip()
     return request.client.host if request.client else None
+
+
+def _set_auth_cookies(response: Response, refresh_token: str, csrf_token: str) -> None:
+    # Secure is mandatory outside development; localhost http dev keeps it off.
+    secure = not is_development()
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=secure,
+        samesite="lax",
+        max_age=REFRESH_COOKIE_MAX_AGE,
+        path="/api/auth",
+    )
+    response.set_cookie(
+        key=CSRF_COOKIE_NAME,
+        value=csrf_token,
+        httponly=False,
+        secure=secure,
+        samesite="lax",
+        max_age=REFRESH_COOKIE_MAX_AGE,
+        path="/",
+    )
+
+
+def _clear_auth_cookies(response: Response) -> None:
+    response.delete_cookie(key="refresh_token", path="/api/auth")
+    response.delete_cookie(key=CSRF_COOKIE_NAME, path="/")
+
+
+def _validate_csrf(header_token: str | None, cookie_token: str | None) -> None:
+    if (
+        not header_token
+        or not cookie_token
+        or not secrets.compare_digest(header_token, cookie_token)
+    ):
+        raise HTTPException(status_code=403, detail="CSRF token missing or invalid")
 
 
 class RegisterRequest(BaseModel):
@@ -142,15 +182,7 @@ async def login(
         ip=_client_ip(request),
     )
 
-    response.set_cookie(
-        key="refresh_token",
-        value=refresh_token,
-        httponly=True,
-        secure=False,
-        samesite="lax",
-        max_age=REFRESH_COOKIE_MAX_AGE,
-        path="/api/auth",
-    )
+    _set_auth_cookies(response, refresh_token, secrets.token_urlsafe(32))
 
     return TokenResponse(access_token=access_token)
 
@@ -160,10 +192,14 @@ async def refresh(
     request: Request,
     response: Response,
     refresh_token: str = Cookie(None),
+    csrf_token: str = Cookie(None, alias=CSRF_COOKIE_NAME),
+    x_csrf_token: str = Header(None, alias=CSRF_HEADER_NAME),
     db: AsyncSession = Depends(get_db),
 ):
     if not refresh_token:
         raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+    _validate_csrf(x_csrf_token, csrf_token)
 
     payload = decode_token(refresh_token)
     if payload.get("type") != "refresh":
@@ -206,15 +242,7 @@ async def refresh(
         user_agent=request.headers.get("user-agent"),
         ip=_client_ip(request),
     )
-    response.set_cookie(
-        key="refresh_token",
-        value=new_refresh,
-        httponly=True,
-        secure=False,
-        samesite="lax",
-        max_age=REFRESH_COOKIE_MAX_AGE,
-        path="/api/auth",
-    )
+    _set_auth_cookies(response, new_refresh, csrf_token or secrets.token_urlsafe(32))
 
     return TokenResponse(access_token=access_token)
 
@@ -223,9 +251,12 @@ async def refresh(
 async def logout(
     response: Response,
     refresh_token: str = Cookie(None),
+    csrf_token: str = Cookie(None, alias=CSRF_COOKIE_NAME),
+    x_csrf_token: str = Header(None, alias=CSRF_HEADER_NAME),
     db: AsyncSession = Depends(get_db),
 ):
     if refresh_token:
+        _validate_csrf(x_csrf_token, csrf_token)
         try:
             payload = decode_token(refresh_token)
         except HTTPException:
@@ -235,7 +266,7 @@ async def logout(
             session = await get_refresh_session(db, hash_jti(jti))
             if session:
                 await revoke_refresh_chain(db, session)
-    response.delete_cookie(key="refresh_token", path="/api/auth")
+    _clear_auth_cookies(response)
     return {"message": "Logged out"}
 
 

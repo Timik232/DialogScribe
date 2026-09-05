@@ -90,7 +90,11 @@ class TestTokenRefreshFlow:
         mock_db.execute = AsyncMock(side_effect=results)
 
         refresh_token = create_refresh_token(user.id)
-        resp = client.post("/api/auth/refresh", cookies={"refresh_token": refresh_token})
+        resp = client.post(
+            "/api/auth/refresh",
+            cookies={"refresh_token": refresh_token, "csrf_token": "csrf-1"},
+            headers={"X-CSRF-Token": "csrf-1"},
+        )
         assert resp.status_code == 200
         assert "access_token" in resp.json()
 

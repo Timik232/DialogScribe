@@ -291,7 +291,7 @@ class TestResetPassword:
         })
 
         assert resp.status_code == 400
-        assert "истекла" in resp.json()["detail"]
+        assert resp.json()["detail"] == "Недействительная или истёкшая ссылка"
         # Token should be cleared on expiry too
         assert user.reset_token_hash is None
         assert user.reset_token_expires is None

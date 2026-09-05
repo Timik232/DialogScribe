@@ -164,7 +164,11 @@ class TestRefresh:
             MagicMock(scalar_one_or_none=lambda: user),
         ]
         mock_db.execute = AsyncMock(side_effect=results)
-        resp = client.post("/api/auth/refresh", cookies={"refresh_token": rt})
+        resp = client.post(
+            "/api/auth/refresh",
+            cookies={"refresh_token": rt, "csrf_token": "csrf-1"},
+            headers={"X-CSRF-Token": "csrf-1"},
+        )
         assert resp.status_code == 200
         assert "access_token" in resp.json()
         assert len(added) == 1
