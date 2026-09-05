@@ -8,7 +8,10 @@ Security contract:
 - /docs, /redoc, /openapi.json must be disabled unless ENVIRONMENT=development.
 """
 
+import base64
+import hashlib
 import importlib
+import json
 import os
 
 import pytest
@@ -16,6 +19,20 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from tests.conftest import setup_auth_override
+
+
+def _csp_hash(script_body: str) -> str:
+    digest = hashlib.sha256(script_body.encode("utf-8")).digest()
+    return "sha256-" + base64.b64encode(digest).decode("ascii")
+
+
+def _script_src_of(csp: str) -> str:
+    return next(d.strip() for d in csp.split(";") if d.strip().startswith("script-src"))
+
+
+@pytest.fixture
+def fresh_csp_cache(monkeypatch):
+    monkeypatch.setattr("api._csp_cache", None)
 
 
 @pytest.fixture
@@ -165,13 +182,60 @@ class TestSecurityHeaders:
         assert "script-src 'self'" in resp.headers["content-security-policy"]
         assert resp.headers["x-content-type-options"] == "nosniff"
 
-    def test_csp_forbids_inline_scripts(self, client, fake_build):
+    def test_csp_forbids_inline_scripts(self, client, fake_build, fresh_csp_cache):
         csp = client.get("/").headers["content-security-policy"]
         script_src = next(
             directive for directive in csp.split(";") if directive.strip().startswith("script-src")
         )
         assert "unsafe-inline" not in script_src
         assert "unsafe-eval" not in script_src
+
+    def test_csp_includes_hash_of_inline_bootstrap_script(self, client, fake_build, fresh_csp_cache):
+        body = "const bootstrapMarker = 1;"
+        (fake_build / "index.html").write_text(
+            f"<html><script>{body}</script></html>", encoding="utf-8"
+        )
+        (fake_build / "csp-hashes.json").write_text(json.dumps([_csp_hash(body)]), encoding="utf-8")
+
+        csp = client.get("/").headers["content-security-policy"]
+
+        assert f"'{_csp_hash(body)}'" in _script_src_of(csp)
+        assert "unsafe-inline" not in _script_src_of(csp)
+
+    def test_csp_reflects_regenerated_hashes_via_mtime_cache(
+        self, client, fake_build, fresh_csp_cache
+    ):
+        hashes_file = fake_build / "csp-hashes.json"
+        first, second = _csp_hash("window.__sveltekit_first = 1;"), _csp_hash(
+            "window.__sveltekit_second = 2;"
+        )
+
+        hashes_file.write_text(json.dumps([first]), encoding="utf-8")
+        os.utime(hashes_file, ns=(10**9, 10**9))
+        assert f"'{first}'" in _script_src_of(client.get("/").headers["content-security-policy"])
+
+        hashes_file.write_text(json.dumps([second]), encoding="utf-8")
+        os.utime(hashes_file, ns=(2 * 10**9, 2 * 10**9))
+        script_src = _script_src_of(client.get("/").headers["content-security-policy"])
+        assert f"'{second}'" in script_src
+        assert f"'{first}'" not in script_src
+
+    def test_csp_dev_fallback_unsafe_inline_without_hashes(
+        self, client, no_build, fresh_csp_cache, monkeypatch
+    ):
+        monkeypatch.setenv("ENVIRONMENT", "development")
+        script_src = _script_src_of(client.get("/").headers["content-security-policy"])
+        assert "'self' 'unsafe-inline'" in script_src
+
+    def test_csp_malformed_hashes_fail_closed(self, client, fake_build, fresh_csp_cache):
+        payload = ["sha256-shortcut; script-src 'unsafe-inline'", 123, None]
+        (fake_build / "csp-hashes.json").write_text(json.dumps(payload), encoding="utf-8")
+
+        script_src = _script_src_of(client.get("/").headers["content-security-policy"])
+
+        assert script_src == "script-src 'self'"
+        assert "unsafe-inline" not in script_src
+        assert "shortcut" not in script_src
 
 
 class TestDocsGating:
