@@ -6,9 +6,11 @@ LLM-суммаризация транскрипций с поддержкой ш
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
@@ -220,36 +222,45 @@ class LLMClient:
         self._config = config or LLMClientConfig()
         self._max_retries = self._config.max_retries
         self._client: Optional[OpenAI] = None
+        # Serializes lazy client initialization and config updates across
+        # worker threads (async endpoints offload blocking LLM calls via
+        # asyncio.to_thread, so multiple threads share one client).
+        self._lock = threading.Lock()
 
     @property
     def config(self) -> LLMClientConfig:
         return self._config
 
     def _get_client(self) -> OpenAI:
-        """Ленивая инициализация OpenAI-клиента."""
+        """Ленивая инициализация OpenAI-клиента (thread-safe)."""
         if self._client is None:
-            if not self._config.api_key:
-                raise ValueError(
-                    "LLM API key не задан в окружении. "
-                    "Укажите LLM_API_KEY (или OPENAI_API_KEY) через Vault/.env."
-                )
-            self._client = OpenAI(
-                base_url=self._config.base_url,
-                api_key=self._config.api_key,
-            )
+            with self._lock:
+                if self._client is None:
+                    if not self._config.api_key:
+                        raise ValueError(
+                            "LLM API key не задан в окружении. "
+                            "Укажите LLM_API_KEY (или OPENAI_API_KEY) через Vault/.env."
+                        )
+                    self._client = OpenAI(
+                        base_url=self._config.base_url,
+                        api_key=self._config.api_key,
+                    )
         return self._client
 
     def update_config(self, base_url: str, api_key: str, model: str) -> None:
         """Обновить конфигурацию и пересоздать клиент.
 
-        .. warning::
-            NOT thread-safe. Mutates shared ``_config`` state.
-            Use ``call(model_override=...)`` for per-request model selection.
+        Thread-safe: guarded by the same lock as lazy initialization, so a
+        concurrent ``_get_client()`` can never observe a half-built client
+        and config mutation cannot interleave with client construction.
+        In-flight calls keep their already-captured client/model references.
+        Use ``call(model_override=...)`` for per-request model selection.
         """
-        self._config.base_url = base_url or DEFAULT_BASE_URL
-        self._config.api_key = api_key
-        self._config.model = model or DEFAULT_MODEL
-        self._client = None
+        with self._lock:
+            self._config.base_url = base_url or DEFAULT_BASE_URL
+            self._config.api_key = api_key
+            self._config.model = model or DEFAULT_MODEL
+            self._client = None
 
     def call(
         self,
@@ -481,39 +492,17 @@ def _hierarchical_reduce(
     return _hierarchical_reduce(sub_results, reduce_prompt, llm_client, max_depth - 1, model=model)
 
 
-async def generate_summary(
+def _generate_summary_compute(
     transcription_text: str,
-    template_key: str,
+    system_prompt: str,
     llm_client: LLMClient,
-    db: Optional["AsyncSession"] = None,
-    user_id: Optional[str] = None,
     model: Optional[str] = None,
 ) -> str:
+    """Synchronous summary compute: blocking LLM calls + retry sleeps.
+
+    Must only run inside a worker thread (callers offload it via
+    ``asyncio.to_thread``); never call directly from an event loop.
     """
-    Сгенерировать саммари транскрипции.
-
-    Args:
-        transcription_text: Полный текст транскрипции
-        template_key: Ключ шаблона (meeting, lecture, interview, general)
-        llm_client: Настроенный LLM-клиент
-        db: AsyncSession для доступа к БД шаблонов
-        user_id: ID пользователя для загрузки кастомных шаблонов
-        model: Per-request model override (thread-safe)
-
-    Returns:
-        Markdown-строка с саммари
-    """
-    if db and user_id:
-        all_templates = await TemplateManager.get_all_templates(db, user_id, SUMMARY_TEMPLATES)
-    else:
-        all_templates = SUMMARY_TEMPLATES
-    template = all_templates.get(template_key)
-    if not template:
-        raise ValueError(
-            f"Неизвестный шаблон: {template_key}. Доступные: {list(all_templates.keys())}"
-        )
-
-    system_prompt = template["system_prompt"]
     effective_model = model or llm_client.config.model
     chunks = split_into_chunks(
         transcription_text, MAX_CHUNK_TOKENS, CHUNK_OVERLAP_SENTENCES, model=effective_model
@@ -542,5 +531,49 @@ async def generate_summary(
         "убрав дубли и сохранив структуру.\n\n"
         f"Используй формат:\n{system_prompt}"
     )
-    final = _hierarchical_reduce(chunk_summaries, reduce_prompt, llm_client, model=model)
-    return final
+    return _hierarchical_reduce(chunk_summaries, reduce_prompt, llm_client, model=model)
+
+
+async def generate_summary(
+    transcription_text: str,
+    template_key: str,
+    llm_client: LLMClient,
+    db: Optional["AsyncSession"] = None,
+    user_id: Optional[str] = None,
+    model: Optional[str] = None,
+) -> str:
+    """
+    Сгенерировать саммари транскрипции.
+
+    Template resolution (ORM access) happens on the event loop; the blocking
+    LLM compute is offloaded to a worker thread via ``asyncio.to_thread`` so
+    the loop stays responsive.
+
+    Args:
+        transcription_text: Полный текст транскрипции
+        template_key: Ключ шаблона (meeting, lecture, interview, general)
+        llm_client: Настроенный LLM-клиент
+        db: AsyncSession для доступа к БД шаблонов
+        user_id: ID пользователя для загрузки кастомных шаблонов
+        model: Per-request model override (thread-safe)
+
+    Returns:
+        Markdown-строка с саммари
+    """
+    if db and user_id:
+        all_templates = await TemplateManager.get_all_templates(db, user_id, SUMMARY_TEMPLATES)
+    else:
+        all_templates = SUMMARY_TEMPLATES
+    template = all_templates.get(template_key)
+    if not template:
+        raise ValueError(
+            f"Неизвестный шаблон: {template_key}. Доступные: {list(all_templates.keys())}"
+        )
+
+    return await asyncio.to_thread(
+        _generate_summary_compute,
+        transcription_text,
+        template["system_prompt"],
+        llm_client,
+        model,
+    )

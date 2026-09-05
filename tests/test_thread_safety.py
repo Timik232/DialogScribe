@@ -2,6 +2,7 @@
 
 import logging
 import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -148,3 +149,89 @@ class TestModelOverrideInCall:
         assert len(start_logs) == 1
         assert "gpt-4o-mini" in start_logs[0].message
         assert "gpt-4.1" not in start_logs[0].message
+
+
+class _FakeOpenAI:
+    instances: list["_FakeOpenAI"] = []
+
+    def __init__(self, base_url=None, api_key=None):
+        time.sleep(0.05)  # widen the init race window
+        self.base_url = base_url
+        self.api_key = api_key
+        _FakeOpenAI.instances.append(self)
+
+
+class TestSharedClientInitAndConfig:
+    """Exactly-one lazy init and config-update safety under concurrency."""
+
+    def test_concurrent_lazy_init_exactly_one_client(self, monkeypatch):
+        _FakeOpenAI.instances = []
+        monkeypatch.setattr("gigaam_transcriber.summarizer.OpenAI", _FakeOpenAI)
+        client = LLMClient(LLMClientConfig(api_key="sk-test", model="gpt-4.1"))
+
+        errors: list[Exception] = []
+
+        def worker() -> None:
+            try:
+                assert client._get_client() is not None
+            except Exception as exc:  # pragma: no cover - failure path
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(16)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, errors
+        assert len(_FakeOpenAI.instances) == 1, (
+            f"lazy init raced: {len(_FakeOpenAI.instances)} clients created for one LLMClient"
+        )
+
+    def test_update_config_during_in_flight_call(self, monkeypatch):
+        _FakeOpenAI.instances = []
+        monkeypatch.setattr("gigaam_transcriber.summarizer.OpenAI", _FakeOpenAI)
+
+        client = LLMClient(LLMClientConfig(api_key="sk-test", model="gpt-4.1"))
+        mock_openai = MagicMock()
+        response = MagicMock()
+        response.choices = [MagicMock()]
+        response.choices[0].message.content = "ok"
+        response.usage.prompt_tokens = 1
+        response.usage.completion_tokens = 1
+
+        def slow_create(**kwargs):
+            time.sleep(0.3)
+            return response
+
+        mock_openai.chat.completions.create.side_effect = slow_create
+        client._client = mock_openai
+
+        call_result: list[str] = []
+        call_error: list[Exception] = []
+
+        def in_flight_call() -> None:
+            try:
+                call_result.append(client.call("sys", "user"))
+            except Exception as exc:  # pragma: no cover - failure path
+                call_error.append(exc)
+
+        thread = threading.Thread(target=in_flight_call)
+        thread.start()
+        time.sleep(0.05)  # call is now inside the (slow) API request
+
+        for i in range(5):
+            client.update_config("http://new", f"sk-{i}", "gpt-4o-mini")
+
+        thread.join()
+
+        assert not call_error, call_error
+        assert call_result == ["ok"], "in-flight call must survive config updates"
+        assert client.config.base_url == "http://new"
+        assert client.config.model == "gpt-4o-mini"
+        assert client._client is None
+        # Next call lazily rebuilds the client exactly once under the new config.
+        client._get_client()
+        client._get_client()
+        assert len(_FakeOpenAI.instances) == 1
+        assert _FakeOpenAI.instances[0].base_url == "http://new"
