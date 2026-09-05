@@ -435,12 +435,13 @@
       "severity": "High",
       "affected_artifact": "routers/_helpers.py, api.py",
       "description": "/v1/audio/transcriptions fails open when API_KEY is empty",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 6 / Release B",
-      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-6-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-6-verification.txt",
-      "expiry": ""
+      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && JWT_SECRET=ci-test-only python -m pytest tests/test_settings_validation.py -q -p no:cacheprovider",
+      "evidence_path": ".sisyphus/evidence/task-6-secret-failures.txt",
+      "expiry": "",
+      "notes": "Task 6: /v1 requires V1_API_ENABLED=true (default false -> 503 without processing); enabled path demands configured API_KEY (503) then bearer checked via secrets.compare_digest (401/200). Evidence: .sisyphus/evidence/task-6-secret-failures.txt and task-6-valid-secrets.txt."
     },
     {
       "id": "SEC-H3",
@@ -533,12 +534,13 @@
       "severity": "Medium",
       "affected_artifact": "gigaam_transcriber/auth.py, auth routes",
       "description": "JWT secret falls back to API key; refresh tokens cannot be revoked and password reset does not revoke sessions",
-      "disposition": "planned",
+      "disposition": "fixed",
       "owner": "DialogScribe remediation team",
       "target": "Task 7 / Release B",
-      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && test -f .sisyphus/evidence/task-7-verification.txt",
-      "evidence_path": ".sisyphus/evidence/task-7-verification.txt",
-      "expiry": ""
+      "verification_command": "python tools/validate_audit_matrix.py audit/findings.json && JWT_SECRET=ci-test-only python -m pytest tests/test_settings_validation.py -q -p no:cacheprovider",
+      "evidence_path": ".sisyphus/evidence/task-6-valid-secrets.txt",
+      "expiry": "",
+      "notes": "Task 6: JWT_SECRET is read solely from gigaam_transcriber/settings.py; the API_KEY fallback is removed and tokens never verify under API_KEY (evidence: task-6-valid-secrets.txt). Session revocation / password-reset revocation half of this row remains Task 7 scope."
     },
     {
       "id": "SEC-M5",
