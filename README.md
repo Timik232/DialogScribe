@@ -150,7 +150,7 @@ HOME=/tmp PYTHONUSERBASE=$HOME/.local JWT_SECRET=ci-test-only python -m pytest -
 | `LLM_API_KEY` | Ключ API для LLM | — |
 | `API_KEY` | Bearer-токен для API-авторизации | — |
 | `MAX_UPLOAD_SIZE_MB` | Макс. размер загрузки (МБ) | `1024` |
-| `DATABASE_URL` | URL базы данных (SQLite) | — |
+| `DATABASE_URL` | URL базы данных. В development без переменной используется одноразовая SQLite `sqlite+aiosqlite:///./dialogscribe-dev.db` (в CWD); в production (`ENVIRONMENT=production`) переменная **обязательна** — старт упадёт без неё | `sqlite+aiosqlite:///./dialogscribe-dev.db` (только dev) |
 | `ADMIN_EMAIL` | Email администратора (начальная загрузка) | — |
 | `ADMIN_PASSWORD` | Пароль администратора | — |
 | `SMTP_HOST` | SMTP-сервер для email | `smtp.mail.ru` |

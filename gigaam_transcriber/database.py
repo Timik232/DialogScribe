@@ -5,7 +5,13 @@ from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
-DATABASE_URL = os.getenv("DATABASE_URL") or "sqlite+aiosqlite:///./data/dialogscribe.db"
+# Security: throwaway CWD-relative dev default — must never look like a real
+# data path; ENVIRONMENT=production requires an explicit DATABASE_URL (settings.py).
+def _default_database_url() -> str:
+    return os.getenv("DATABASE_URL") or "sqlite+aiosqlite:///./dialogscribe-dev.db"
+
+
+DATABASE_URL = _default_database_url()
 
 
 def _ensure_sqlite_parent_dir(url: str) -> None:

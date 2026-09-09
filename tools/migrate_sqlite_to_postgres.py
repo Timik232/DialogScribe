@@ -7,7 +7,7 @@ verbatim. alembic_version is compared but never copied.
 
 Usage:
     python tools/migrate_sqlite_to_postgres.py \
-        --source sqlite:///data/dialogscribe.db \
+        --source sqlite:///dialogscribe-dev.db \
         --dest postgresql+asyncpg://user:pass@host:5432/dbname \
         [--truncate] [--yes]
 
@@ -61,7 +61,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Copy all DialogScribe data from SQLite to PostgreSQL (dest schema must already be at alembic head)."
     )
-    parser.add_argument("--source", required=True, help="source sync SQLAlchemy URL, e.g. sqlite:///data/dialogscribe.db")
+    parser.add_argument("--source", required=True, help="source sync SQLAlchemy URL, e.g. sqlite:///dialogscribe-dev.db")
     parser.add_argument("--dest", required=True, help="dest async SQLAlchemy URL, e.g. postgresql+asyncpg://user:pass@host:5432/dbname")
     parser.add_argument("--truncate", action="store_true", help="TRUNCATE all dest tables before copying")
     parser.add_argument("--yes", action="store_true", help="actually write data (default: dry run)")

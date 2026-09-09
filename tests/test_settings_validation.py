@@ -20,7 +20,9 @@ from fastapi.testclient import TestClient
 
 STRONG_JWT = "jwt-" + "a" * 60
 STRONG_KEY = "key-" + "b" * 60
-TRACKED_VARS = ("ENVIRONMENT", "JWT_SECRET", "API_KEY", "V1_API_ENABLED")
+# Dummy explicit DB URL for production-mode tests (not a secret, never real).
+PROD_DB_URL = "postgresql+asyncpg://ci:ci@localhost:5432/dialogscribe_ci"
+TRACKED_VARS = ("ENVIRONMENT", "JWT_SECRET", "API_KEY", "V1_API_ENABLED", "DATABASE_URL")
 
 
 def _with_env(**overrides: str | None) -> None:
@@ -113,7 +115,13 @@ class TestProductionValidation:
             importlib.reload(settings_module)
 
     def test_production_accepts_strong_distinct_secrets(self):
-        _with_env(ENVIRONMENT="production", JWT_SECRET=STRONG_JWT, V1_API_ENABLED="true", API_KEY=STRONG_KEY)
+        _with_env(
+            ENVIRONMENT="production",
+            JWT_SECRET=STRONG_JWT,
+            V1_API_ENABLED="true",
+            API_KEY=STRONG_KEY,
+            DATABASE_URL=PROD_DB_URL,
+        )
         settings_module, _, _ = reload_modules()
 
         assert settings_module.JWT_SECRET == STRONG_JWT
@@ -165,6 +173,51 @@ class TestDevelopmentValidation:
         assert not [r for r in caplog.records if "Insecure secrets configuration" in r.message]
 
 
+class TestDatabaseUrlValidation:
+    @pytest.mark.parametrize("missing", [None, "", "   "])
+    def test_production_aborts_for_missing_or_empty_database_url(self, missing):
+        _with_env(ENVIRONMENT="production", JWT_SECRET=STRONG_JWT, DATABASE_URL=missing)
+        import gigaam_transcriber.settings as settings_module
+
+        with pytest.raises(RuntimeError, match="DATABASE_URL"):
+            importlib.reload(settings_module)
+
+    def test_production_abort_message_instructs_explicit_database_url(self):
+        _with_env(ENVIRONMENT="production", JWT_SECRET=STRONG_JWT, DATABASE_URL=None)
+        import gigaam_transcriber.settings as settings_module
+
+        with pytest.raises(RuntimeError) as excinfo:
+            importlib.reload(settings_module)
+        message = str(excinfo.value)
+        assert "set DATABASE_URL explicitly" in message
+        assert "dialogscribe-dev.db" in message  # names the refused fallback, not a value
+
+    def test_production_reports_secrets_problems_before_database_url(self):
+        _with_env(ENVIRONMENT="production", JWT_SECRET="short", DATABASE_URL=None)
+        import gigaam_transcriber.settings as settings_module
+
+        with pytest.raises(RuntimeError, match="JWT_SECRET"):
+            importlib.reload(settings_module)
+
+    def test_development_warns_but_does_not_abort_for_missing_database_url(self, caplog):
+        _with_env(ENVIRONMENT="development", JWT_SECRET=STRONG_JWT, DATABASE_URL=None)
+        import gigaam_transcriber.settings as settings_module
+
+        with caplog.at_level(logging.WARNING, logger="dialogscribe.settings"):
+            importlib.reload(settings_module)
+
+        assert any("DATABASE_URL" in record.message for record in caplog.records)
+
+    def test_unset_environment_warns_but_stays_importable(self, caplog):
+        _with_env(JWT_SECRET="ci-test-only", DATABASE_URL=None)
+        import gigaam_transcriber.settings as settings_module
+
+        with caplog.at_level(logging.WARNING, logger="dialogscribe.settings"):
+            importlib.reload(settings_module)
+
+        assert any("DATABASE_URL" in record.message for record in caplog.records)
+
+
 class TestJwtSecretIndependence:
     def test_jwt_secret_no_longer_falls_back_to_api_key(self):
         _with_env(JWT_SECRET=None, API_KEY=STRONG_KEY)
@@ -178,7 +231,12 @@ class TestJwtSecretIndependence:
 
 class TestV1Matrix:
     def test_v1_disabled_returns_503_without_processing(self):
-        _with_env(ENVIRONMENT="production", JWT_SECRET=STRONG_JWT, API_KEY=STRONG_KEY)
+        _with_env(
+            ENVIRONMENT="production",
+            JWT_SECRET=STRONG_JWT,
+            API_KEY=STRONG_KEY,
+            DATABASE_URL=PROD_DB_URL,
+        )
         _, _, api_module = reload_modules()
 
         with _client(api_module) as (client, mock_transcriber):
@@ -207,6 +265,7 @@ class TestV1Matrix:
             JWT_SECRET=STRONG_JWT,
             V1_API_ENABLED="true",
             API_KEY=STRONG_KEY,
+            DATABASE_URL=PROD_DB_URL,
         )
         _, _, api_module = reload_modules()
 
@@ -223,6 +282,7 @@ class TestV1Matrix:
             JWT_SECRET=STRONG_JWT,
             V1_API_ENABLED="true",
             API_KEY=STRONG_KEY,
+            DATABASE_URL=PROD_DB_URL,
         )
         _, _, api_module = reload_modules()
 

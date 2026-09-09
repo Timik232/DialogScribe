@@ -23,8 +23,9 @@ services:
       - JWT_SECRET=${JWT_SECRET:?set JWT_SECRET in .env.dev (dev-only value, >=32 chars)}
       - API_KEY=${API_KEY:-}
       - V1_API_ENABLED=${V1_API_ENABLED:-false}
-      # Database (SQLite inside container)
-      - DATABASE_URL=sqlite+aiosqlite:////app/data/dialogscribe.db
+      # Database — disposable dev SQLite inside the container (named volume
+      # keeps it across restarts); override for anything you care about.
+      - DATABASE_URL=${DATABASE_URL:-sqlite+aiosqlite:////app/data/dialogscribe-dev.db}
       # Server
       - HOST=0.0.0.0
       - PORT=7860

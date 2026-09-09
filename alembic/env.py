@@ -15,7 +15,7 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
-db_url = os.getenv("DATABASE_URL") or "sqlite+aiosqlite:///./data/dialogscribe.db"
+db_url = os.getenv("DATABASE_URL") or "sqlite+aiosqlite:///./dialogscribe-dev.db"
 config.set_main_option("sqlalchemy.url", db_url)
 
 
