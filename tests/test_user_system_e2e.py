@@ -21,6 +21,15 @@ def mock_db():
     db = AsyncMock()
     db.flush = AsyncMock()
     db.commit = AsyncMock()
+
+    def _execute_result(rows=None):
+        result = MagicMock()
+        result.first.return_value = rows[0] if rows else None
+        result.scalars.return_value.all.return_value = rows or []
+        result.scalar_one_or_none.return_value = rows[0] if rows else None
+        return result
+
+    db.execute = AsyncMock(side_effect=lambda _stmt, *_a, **_k: _execute_result([]))
     return db
 
 
