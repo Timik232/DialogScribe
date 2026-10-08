@@ -22,14 +22,20 @@ def mock_db():
     db.flush = AsyncMock()
     db.commit = AsyncMock()
 
-    def _execute_result(rows=None):
-        result = MagicMock()
-        result.first.return_value = rows[0] if rows else None
-        result.scalars.return_value.all.return_value = rows or []
-        result.scalar_one_or_none.return_value = rows[0] if rows else None
-        return result
+    # Truthy row for user/settings lookups (login, admin, /me); numeric
+    # subscript so usage-limit queries like row[0] >= limit compare as 0.
+    row = MagicMock()
+    row.__getitem__.return_value = 0
 
-    db.execute = AsyncMock(side_effect=lambda _stmt, *_a, **_k: _execute_result([]))
+    result = MagicMock()
+    result.__getitem__.return_value = 0
+    result.first.return_value = row
+    result.scalar_one_or_none.return_value = row
+    result.fetchone.return_value = row
+    result.scalars.return_value.all.return_value = [row]
+    result.scalars.return_value.first.return_value = row
+
+    db.execute = AsyncMock(return_value=result)
     return db
 
 
