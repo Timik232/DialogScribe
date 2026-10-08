@@ -7,11 +7,15 @@ LLM-модуль для ответов на вопросы по транскри
 
 import hashlib
 import logging
+import os
+import threading
+import time
 from typing import Optional
 
 from gigaam_transcriber.summarizer import LLMClient
 from gigaam_transcriber.context_utils import (
     estimate_tokens,
+    estimate_tokens_accurate,
     find_relevant_chunks,
     get_context_budget,
     get_model_context_limit,
@@ -45,14 +49,80 @@ CHUNK_SUMMARY_PROMPT = """\
 Ответ на русском, 3-5 предложений."""
 
 # ---------------------------------------------------------------------------
-# Chunk summary cache
+# Chunk summary cache (bounded: max entries + TTL, thread-safe)
 # ---------------------------------------------------------------------------
 
-_chunk_summary_cache: dict[str, list[dict]] = {}
+DEFAULT_CHAT_CACHE_MAX_ENTRIES = 64
+DEFAULT_CHAT_CACHE_TTL_SECONDS = 3600.0
+
+# key -> (expires_at monotonic deadline, summaries)
+_chunk_summary_cache: dict[str, tuple[float, list[dict]]] = {}
+_cache_lock = threading.Lock()
 
 
 def _get_cache_key(text: str) -> str:
-    return hashlib.md5(text.encode()).hexdigest()
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _chat_cache_max_entries() -> int:
+    raw = os.getenv("CHAT_CACHE_MAX_ENTRIES", "")
+    if raw.strip():
+        try:
+            value = int(raw)
+        except ValueError:
+            logger.warning("Invalid CHAT_CACHE_MAX_ENTRIES=%r, using %d", raw, DEFAULT_CHAT_CACHE_MAX_ENTRIES)
+            return DEFAULT_CHAT_CACHE_MAX_ENTRIES
+        if value > 0:
+            return value
+        logger.warning("Non-positive CHAT_CACHE_MAX_ENTRIES=%r, using %d", raw, DEFAULT_CHAT_CACHE_MAX_ENTRIES)
+    return DEFAULT_CHAT_CACHE_MAX_ENTRIES
+
+
+def _chat_cache_ttl_seconds() -> float:
+    raw = os.getenv("CHAT_CACHE_TTL_SECONDS", "")
+    if raw.strip():
+        try:
+            value = float(raw)
+        except ValueError:
+            logger.warning("Invalid CHAT_CACHE_TTL_SECONDS=%r, using %.0f", raw, DEFAULT_CHAT_CACHE_TTL_SECONDS)
+            return DEFAULT_CHAT_CACHE_TTL_SECONDS
+        if value > 0:
+            return value
+        logger.warning("Non-positive CHAT_CACHE_TTL_SECONDS=%r, using %.0f", raw, DEFAULT_CHAT_CACHE_TTL_SECONDS)
+    return DEFAULT_CHAT_CACHE_TTL_SECONDS
+
+
+def _cache_get(key: str) -> list[dict] | None:
+    now = time.monotonic()
+    with _cache_lock:
+        entry = _chunk_summary_cache.get(key)
+        if entry is None:
+            return None
+        expires_at, summaries = entry
+        if now >= expires_at:
+            del _chunk_summary_cache[key]
+            return None
+        return summaries
+
+
+def _cache_put(key: str, summaries: list[dict]) -> None:
+    now = time.monotonic()
+    ttl = _chat_cache_ttl_seconds()
+    max_entries = _chat_cache_max_entries()
+    with _cache_lock:
+        for stale in [k for k, (exp, _) in _chunk_summary_cache.items() if now >= exp]:
+            del _chunk_summary_cache[stale]
+        # Re-insert so FIFO eviction order reflects recency of use.
+        _chunk_summary_cache.pop(key, None)
+        while len(_chunk_summary_cache) >= max_entries:
+            _chunk_summary_cache.pop(next(iter(_chunk_summary_cache)))
+        _chunk_summary_cache[key] = (now + ttl, summaries)
+
+
+def reset_chunk_summary_cache() -> None:
+    """Clear the shared cache (test/ops hook)."""
+    with _cache_lock:
+        _chunk_summary_cache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +134,7 @@ def _create_chunk_summaries(
     text: str,
     llm_client: LLMClient,
     chunk_size: int = 3000,
+    model: Optional[str] = None,
 ) -> list[dict]:
     """Split transcript into chunks and summarize each."""
     chunks = split_into_chunks(text, max_tokens=chunk_size)
@@ -72,7 +143,7 @@ def _create_chunk_summaries(
     for i, chunk in enumerate(chunks):
         logger.debug("Summarizing chunk %d/%d", i + 1, len(chunks))
         try:
-            summary = llm_client.call(CHUNK_SUMMARY_PROMPT, chunk, max_tokens=512)
+            summary = llm_client.call(CHUNK_SUMMARY_PROMPT, chunk, max_tokens=512, model_override=model)
             summaries.append({
                 "index": i,
                 "summary": summary.strip(),
@@ -93,6 +164,7 @@ def _build_compressed_context(
     chunk_summaries: list[dict],
     query: str,
     max_tokens: int = 30000,
+    model: Optional[str] = None,
 ) -> str:
     """Build compressed context from chunk summaries + relevant chunks."""
     parts: list[str] = []
@@ -102,7 +174,7 @@ def _build_compressed_context(
     overview_parts: list[str] = []
     for cs in chunk_summaries:
         line = f"[Часть {cs['index'] + 1}] {cs['summary']}"
-        line_tokens = estimate_tokens(line)
+        line_tokens = estimate_tokens_accurate(line, model) if model else estimate_tokens(line)
         if used_tokens + line_tokens > max_tokens // 2:
             break
         overview_parts.append(line)
@@ -116,7 +188,7 @@ def _build_compressed_context(
         if relevant:
             parts.append("\n\nРЕЛЕВАНТНЫЕ ФРАГМЕНТЫ:\n")
             for j, r in enumerate(relevant):
-                r_tokens = estimate_tokens(r)
+                r_tokens = estimate_tokens_accurate(r, model) if model else estimate_tokens(r)
                 if used_tokens + r_tokens > max_tokens:
                     break
                 parts.append(f"\n--- Фрагмент {j + 1} ---\n{r}\n")
@@ -143,21 +215,15 @@ def chat_with_transcript(
     if llm_client is None:
         llm_client = LLMClient()
 
-    if model and model != llm_client.config.model:
-        llm_client.update_config(
-            llm_client.config.base_url,
-            llm_client.config.api_key,
-            model,
-        )
+    effective_model = model or llm_client.config.model
 
-    effective_model = llm_client.config.model
     history = messages[:-1] if messages else []
     latest_message = messages[-1] if messages else None
 
     budget = get_context_budget(effective_model, CHAT_SYSTEM_PROMPT, text, history)
 
     if budget["needs_compression"]:
-        transcript_content = _get_compressed_transcript(text, latest_message, llm_client, budget)
+        transcript_content = _get_compressed_transcript(text, latest_message, llm_client, budget, model=model)
     else:
         transcript_content = f"TRANSCRIPT:\n{text}"
 
@@ -190,18 +256,20 @@ def _get_compressed_transcript(
     latest_message: Optional[dict],
     llm_client: LLMClient,
     budget: dict,
+    model: Optional[str] = None,
 ) -> str:
     """Get or create compressed transcript context."""
     cache_key = _get_cache_key(text)
-    if cache_key not in _chunk_summary_cache:
+    summaries = _cache_get(cache_key)
+    if summaries is None:
         logger.info("Creating chunk summaries for long transcript (cache miss)")
-        _chunk_summary_cache[cache_key] = _create_chunk_summaries(text, llm_client)
+        summaries = _create_chunk_summaries(text, llm_client, model=model)
+        _cache_put(cache_key, summaries)
 
-    summaries = _chunk_summary_cache[cache_key]
     query = latest_message.get("content", "") if latest_message else ""
     max_ctx = min(budget["total"] // 2, 60000)
 
-    return _build_compressed_context(summaries, query, max_tokens=max_ctx)
+    return _build_compressed_context(summaries, query, max_tokens=max_ctx, model=model)
 
 
 def _truncate_history(
@@ -211,8 +279,8 @@ def _truncate_history(
 ) -> list[dict]:
     """Truncate conversation history to fit within token budget."""
     max_context = get_model_context_limit(model)
-    transcript_tokens = estimate_tokens(transcript_content)
-    system_tokens = estimate_tokens(CHAT_SYSTEM_PROMPT)
+    transcript_tokens = estimate_tokens_accurate(transcript_content, model)
+    system_tokens = estimate_tokens_accurate(CHAT_SYSTEM_PROMPT, model)
     budget = max_context - transcript_tokens - system_tokens - 4096  # reserve for output
 
     if budget <= 0:
@@ -221,7 +289,7 @@ def _truncate_history(
     kept: list[dict] = []
     used = 0
     for msg in reversed(messages):
-        msg_tokens = estimate_tokens(msg.get("content", ""))
+        msg_tokens = estimate_tokens_accurate(msg.get("content", ""), model)
         if used + msg_tokens > budget or len(kept) >= 10:
             break
         kept.insert(0, msg)

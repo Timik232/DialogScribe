@@ -8,18 +8,99 @@
 
 import logging
 import os
+import threading
 import warnings
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .data_models import SpeakerSegment, TranscriptionSegment
 from .exceptions import DiarizationError, HFTokenMissingError
 
 logger = logging.getLogger(__name__)
 
-# Кэш для загруженных моделей
-_diarization_pipeline = None
-_embedding_model = None
+# Ревизии моделей: входят в ключ кэша, чтобы смена ревизии не коллизировала
+PYANNOTE_PIPELINE_REVISION = "pyannote/speaker-diarization-3.1"
+SPEECHBRAIN_EMBEDDING_REVISION = "speechbrain/spkrec-ecapa-voxceleb"
+
+# Метка спикера для сегментов, которым нельзя детерминированно
+# назначить соседа после кластеризации
+SPEAKER_UNKNOWN = "SPEAKER_UNKNOWN"
+
+# Минимальная длительность сегмента для построения эмбеддинга (секунды)
+MIN_EMBEDDING_SEGMENT_SECONDS = 0.5
+
+CacheKey = Tuple[str, str, str, str]
+
+
+class _DiarizationModelCache:
+    """Процесс-широкий кэш моделей диаризации.
+    
+    Ключ — (backend, revision, device, dtype). Загрузка модели
+    сериализуется локом кэша (одна загрузка на ключ), а небезопасный
+    совместный инференс — отдельным локом на запись кэша.
+    """
+    
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._models: Dict[CacheKey, Any] = {}
+        self._inference_locks: Dict[CacheKey, threading.Lock] = {}
+    
+    @staticmethod
+    def make_key(
+        backend: str,
+        revision: str,
+        device: str,
+        dtype: str,
+    ) -> CacheKey:
+        return (backend, revision, device, dtype)
+    
+    def get_or_load(self, key: CacheKey, factory: Callable[[], Any]) -> Any:
+        """Получить модель из кэша, при необходимости загрузив один раз."""
+        with self._lock:
+            if key not in self._models:
+                logger.info("Загрузка модели диаризации в кэш: %s", (key,))
+                self._models[key] = factory()
+                self._inference_locks[key] = threading.Lock()
+            return self._models[key]
+    
+    def inference_lock(self, key: CacheKey) -> threading.Lock:
+        """Лок, сериализующий инференс модели с данным ключом."""
+        with self._lock:
+            if key not in self._inference_locks:
+                raise KeyError(f"Модель для ключа {key!r} не загружена")
+            return self._inference_locks[key]
+    
+    def release(self, key: Optional[CacheKey] = None) -> List[CacheKey]:
+        """Освободить записи кэша (все или одну); идемпотентно."""
+        with self._lock:
+            if key is None:
+                released = list(self._models)
+                self._models.clear()
+                self._inference_locks.clear()
+            else:
+                released = [key] if key in self._models else []
+                self._models.pop(key, None)
+                self._inference_locks.pop(key, None)
+            return released
+    
+    def keys(self) -> List[CacheKey]:
+        with self._lock:
+            return list(self._models)
+    
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._models)
+
+
+_model_cache = _DiarizationModelCache()
+
+
+def release_diarization_models() -> List[CacheKey]:
+    """Освободить все закэшированные модели диаризации (идемпотентно)."""
+    released = _model_cache.release()
+    if released:
+        logger.info("Модели диаризации освобождены из кэша: %s", released)
+    return released
 
 
 class DiarizationManager:
@@ -31,6 +112,7 @@ class DiarizationManager:
         device: str = "auto",
         min_speakers: Optional[int] = None,
         max_speakers: Optional[int] = None,
+        dtype: str = "float32",
     ):
         """
         Инициализация менеджера диаризации.
@@ -40,13 +122,21 @@ class DiarizationManager:
             device: Устройство ("auto", "cuda", "cpu")
             min_speakers: Минимальное количество спикеров
             max_speakers: Максимальное количество спикеров
+            dtype: Тип данных модели (часть ключа кэша)
         """
         self.hf_token = hf_token or os.getenv("HF_TOKEN")
         self.device = self._resolve_device(device)
+        logger.info("Диаризация pyannote: устройство %s", self.device)
         self.min_speakers = min_speakers
         self.max_speakers = max_speakers
+        self.dtype = dtype
         
         self._pipeline = None
+    
+    def _cache_key(self) -> CacheKey:
+        return _model_cache.make_key(
+            "pyannote", PYANNOTE_PIPELINE_REVISION, self.device, self.dtype
+        )
     
     def _resolve_device(self, device: str) -> str:
         """Определение устройства."""
@@ -60,9 +150,11 @@ class DiarizationManager:
     
     @property
     def pipeline(self):
-        """Ленивая загрузка pipeline диаризации."""
+        """Ленивая загрузка pipeline диаризации (процесс-широкий кэш)."""
         if self._pipeline is None:
-            self._pipeline = self._load_pipeline()
+            self._pipeline = _model_cache.get_or_load(
+                self._cache_key(), self._load_pipeline
+            )
         return self._pipeline
     
     def _load_pipeline(self):
@@ -235,10 +327,13 @@ class DiarizationManager:
                 if max_speakers is not None:
                     kwargs["max_speakers"] = max_speakers
             
-            # Запуск диаризации
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                diarization = self.pipeline(str(audio_path), **kwargs)
+            # Инференс общей модели сериализуется локом кэша:
+            # совместный GPU-вызов небезопасен между потоками
+            pipeline = self.pipeline
+            with _model_cache.inference_lock(self._cache_key()):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    diarization = pipeline(str(audio_path), **kwargs)
             
             # Преобразование результатов
             segments = []
@@ -383,6 +478,7 @@ class HybridDiarization:
         hf_token: Optional[str] = None,
         device: str = "auto",
         num_clusters: Optional[int] = None,
+        dtype: str = "float32",
     ):
         """
         Инициализация гибридной диаризации.
@@ -391,34 +487,47 @@ class HybridDiarization:
             hf_token: HuggingFace токен
             device: Устройство
             num_clusters: Ожидаемое количество спикеров
+            dtype: Тип данных модели (часть ключа кэша)
         """
         self.hf_token = hf_token or os.getenv("HF_TOKEN")
         if device == "auto":
             import torch
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
+        logger.info("Гибридная диаризация: устройство %s", self.device)
         self.num_clusters = num_clusters
+        self.dtype = dtype
         
         self._embedding_model = None
         self._vad_model = None
     
-    def _get_embedding_model(self):
-        """Загрузка модели эмбеддингов спикера."""
-        if self._embedding_model is None:
-            try:
-                from speechbrain.inference.speaker import EncoderClassifier
-            except ImportError:
-                raise DiarizationError(
-                    "speechbrain не установлен. "
-                    "Установите: pip install speechbrain"
-                )
-            
-            self._embedding_model = EncoderClassifier.from_hparams(
-                source="speechbrain/spkrec-ecapa-voxceleb",
-                savedir="pretrained_models/spkrec-ecapa-voxceleb",
-                run_opts={"device": self.device}
+    def _cache_key(self) -> CacheKey:
+        return _model_cache.make_key(
+            "speechbrain", SPEECHBRAIN_EMBEDDING_REVISION, self.device, self.dtype
+        )
+    
+    def _load_embedding_model(self):
+        """Загрузка модели эмбеддингов спикера (фабрика для кэша)."""
+        try:
+            from speechbrain.inference.speaker import EncoderClassifier
+        except ImportError:
+            raise DiarizationError(
+                "speechbrain не установлен. "
+                "Установите: pip install speechbrain"
             )
         
+        return EncoderClassifier.from_hparams(
+            source=SPEECHBRAIN_EMBEDDING_REVISION,
+            savedir="pretrained_models/spkrec-ecapa-voxceleb",
+            run_opts={"device": self.device}
+        )
+    
+    def _get_embedding_model(self):
+        """Модель эмбеддингов из процесс-широкого кэша."""
+        if self._embedding_model is None:
+            self._embedding_model = _model_cache.get_or_load(
+                self._cache_key(), self._load_embedding_model
+            )
         return self._embedding_model
     
     def diarize(
@@ -462,22 +571,26 @@ class HybridDiarization:
             resampler = torchaudio.transforms.Resample(sr, target_sr)
             waveform = resampler(waveform)
         
-        # Получаем эмбеддинги для каждого сегмента
-        embeddings = []
+        # Явные записи (исходный индекс, сегмент, эмбеддинг): короткие
+        # сегменты пропускаются, но их индексы не смешиваются с эмбеддингами
+        records = []
         model = self._get_embedding_model()
         
-        for start, end in speech_segments:
+        for index, (start, end) in enumerate(speech_segments):
             start_sample = int(start * target_sr)
             end_sample = int(end * target_sr)
             segment = waveform[:, start_sample:end_sample]
             
-            if segment.shape[1] < target_sr * 0.5:  # Минимум 0.5 сек
+            if segment.shape[1] < target_sr * MIN_EMBEDDING_SEGMENT_SECONDS:
                 continue
             
-            embedding = model.encode_batch(segment)
-            embeddings.append(embedding.squeeze().cpu().numpy())
+            # Инференс общей модели сериализуется локом кэша; результат
+            # фиксируется в локальной переменной до освобождения лока
+            with _model_cache.inference_lock(self._cache_key()):
+                embedding = model.encode_batch(segment)
+            records.append((index, (start, end), embedding.squeeze().cpu().numpy()))
         
-        if len(embeddings) < 2:
+        if len(records) < 2:
             # Недостаточно сегментов для кластеризации
             return [
                 SpeakerSegment(start=s, end=e, speaker="Спикер №1")
@@ -485,7 +598,7 @@ class HybridDiarization:
             ]
         
         # Кластеризация
-        embeddings = np.array(embeddings)
+        embeddings = np.array([record[2] for record in records])
         n_clusters = min(num_speakers, len(embeddings))
         
         clustering = AgglomerativeClustering(
@@ -495,16 +608,54 @@ class HybridDiarization:
         )
         labels = clustering.fit_predict(embeddings)
         
-        # Создаём результат
+        # Метки применяются ТОЛЬКО к записям с эмбеддингами
+        labeled_speakers = {
+            record[0]: f"Спикер №{label + 1}"
+            for record, label in zip(records, labels)
+        }
+        
+        # Результат сохраняет количество и порядок входных сегментов;
+        # пропущенным сегментам назначается ближайший во времени сосед
         result = []
-        for (start, end), label in zip(speech_segments, labels):
-            result.append(SpeakerSegment(
-                start=start,
-                end=end,
-                speaker=f"Спикер №{label + 1}"
-            ))
+        for index, (start, end) in enumerate(speech_segments):
+            speaker = labeled_speakers.get(index)
+            if speaker is None:
+                speaker = self._nearest_labeled_speaker(
+                    start, end, labeled_speakers, speech_segments
+                )
+            result.append(SpeakerSegment(start=start, end=end, speaker=speaker))
         
         return result
+    
+    @staticmethod
+    def _nearest_labeled_speaker(
+        start: float,
+        end: float,
+        labeled_speakers: Dict[int, str],
+        speech_segments: List[Tuple[float, float]],
+    ) -> str:
+        """Найти детерминированного ближайшего во времени соседа с меткой.
+        
+        Расстояние — доля зазора между сегментами (0 при пересечении);
+        при равенстве выбирается сегмент с меньшим исходным индексом.
+        Если размеченных сегментов нет — SPEAKER_UNKNOWN.
+        """
+        best_index = None
+        best_distance = None
+        
+        for index in labeled_speakers:
+            other_start, other_end = speech_segments[index]
+            distance = max(0.0, other_start - end, start - other_end)
+            
+            if (best_distance is None
+                    or distance < best_distance
+                    or (distance == best_distance and index < best_index)):
+                best_distance = distance
+                best_index = index
+        
+        if best_index is None:
+            return SPEAKER_UNKNOWN
+        return labeled_speakers[best_index]
 
 
 def get_diarization_manager(

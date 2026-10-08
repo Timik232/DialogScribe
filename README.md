@@ -81,8 +81,8 @@ LLM_API_KEY=your_openai_api_key_here
 # API-ключ для авторизации (опционально)
 API_KEY=your-api-key-here
 
-# Лимит загрузки (МБ, по умолчанию 100)
-MAX_UPLOAD_SIZE_MB=100
+# Лимит загрузки (МБ, по умолчанию 1024 — единое значение с docker-compose, фронтендом и кодом)
+MAX_UPLOAD_SIZE_MB=1024
 ```
 
 ### Сборка и запуск
@@ -102,10 +102,10 @@ docker compose up -d
 docker compose -f docker-compose.dev.yaml up -d --build
 ```
 
-Для запуска тестов (488 тестов, не требуют GPU/HF-токен):
+Для запуска тестов (900+ тестов, не требуют GPU/HF-токен):
 
 ```bash
-python -m pytest -m "not slow and not requires_gpu and not requires_hf_token and not requires_model"
+HOME=/tmp PYTHONUSERBASE=$HOME/.local JWT_SECRET=ci-test-only python -m pytest -q -m "not slow and not requires_gpu and not requires_hf_token and not requires_model"
 ```
 
 ### Vault Agent
@@ -116,17 +116,25 @@ python -m pytest -m "not slow and not requires_gpu and not requires_hf_token and
 
 | Endpoint | Описание |
 |----------|----------|
-| `POST /v1/audio/transcriptions` | OpenAI-совместимая транскрипция |
+| `POST /v1/audio/transcriptions` | OpenAI-совместимая транскрипция — **выключена по умолчанию** (503; включается `V1_API_ENABLED=true` + `API_KEY`) |
 | `POST /api/transcribe` | Транскрипция с расширенными параметрами |
 | `POST /api/summary` | Генерация саммари (LLM) |
 | `POST /api/mindmap` | Генерация майндмапа (LLM) |
 | `POST /api/insights` | Извлечение инсайтов (LLM) |
 | `POST /api/chat` | Чат с контекстом транскрипции |
-| `WS /api/live-hints/ws` | Live-подсказки в реальном времени (WebSocket, JWT auth via query param) |
+| `WS /api/live-hints/ws` | Live-подсказки в реальном времени (WebSocket; JWT в первом текстовом кадре; ошибки протокола — close-коды 44xx) |
+| `WS /api/autoflow/ws` | Автопоток транскрипции+аналитики (WebSocket; JWT в первом текстовом кадре; лимиты — terminal-событие `limit_exceeded`) |
+| `GET/PUT /api/settings/asr-provider` | Настройка ASR-провайдера пользователя (mistral/litellm, по умолчанию litellm) |
 | `GET /api/models` | Список доступных LLM-моделей |
-| Auth routes | Регистрация, логин, восстановление пароля |
+| `/api/saved-transcriptions` | CRUD сохранённых транскрипций + share-ссылки (`/api/share/{share_id}` — публичный доступ без auth) |
+| `POST /api/meeting-prep` | Подготовка к встрече (LLM) |
+| Auth routes | Регистрация, логин, refresh/logout, восстановление пароля (rate-limited) |
 | Admin routes | Управление пользователями, лимитами |
-| Export routes | Экспорт в TXT, JSON, SRT, VTT, DOCX |
+| Export routes | Экспорт в TXT, JSON, SRT, VTT, DOCX, PDF |
+
+Ошибки API возвращают стабильный код + `correlation_id` (заголовок `X-Correlation-ID` на каждом ответе) — детали остаются в серверных логах.
+
+Для обоих WebSocket endpoint первый текстовый кадр в течение 10 секунд должен содержать JSON `{"token": "..."}`. JWT в query-параметре не поддерживается и отклоняется (close `4400`). Таймаут первого кадра закрывает соединение с кодом `4408`, недействительный JWT — `4401`. Заголовок `Origin` также проверяется: разрешены same-origin и origins из `WS_ALLOWED_ORIGINS`; остальные запросы закрываются с кодом `4400`.
 
 ## Переменные окружения
 
@@ -141,8 +149,8 @@ python -m pytest -m "not slow and not requires_gpu and not requires_hf_token and
 | `LLM_MODELS` | Список доступных моделей (через запятую) | `gpt-4.1,gpt-4o-mini` |
 | `LLM_API_KEY` | Ключ API для LLM | — |
 | `API_KEY` | Bearer-токен для API-авторизации | — |
-| `MAX_UPLOAD_SIZE_MB` | Макс. размер загрузки (МБ) | `100` |
-| `DATABASE_URL` | URL базы данных (SQLite) | — |
+| `MAX_UPLOAD_SIZE_MB` | Макс. размер загрузки (МБ) | `1024` |
+| `DATABASE_URL` | URL базы данных. В development без переменной используется одноразовая SQLite `sqlite+aiosqlite:///./dialogscribe-dev.db` (в CWD); в production (`ENVIRONMENT=production`) переменная **обязательна** — старт упадёт без неё | `sqlite+aiosqlite:///./dialogscribe-dev.db` (только dev) |
 | `ADMIN_EMAIL` | Email администратора (начальная загрузка) | — |
 | `ADMIN_PASSWORD` | Пароль администратора | — |
 | `SMTP_HOST` | SMTP-сервер для email | `smtp.mail.ru` |
@@ -168,7 +176,8 @@ DialogScribe/
 │   ├── autoflow.py            # Автопотоки
 │   ├── live_hints.py          # Подсказки в реальном времени
 │   ├── usage.py               # Отслеживание использования
-│   └── saved_transcriptions.py# Сохранённые транскрипции
+│   ├── saved_transcriptions.py# Сохранённые транскрипции
+│   └── settings.py            # Настройки пользователя (ASR-провайдер)
 ├── gigaam_transcriber/        # Ядро транскрипции
 │   ├── transcriber.py         # GigaAMTranscriber → MistralASRClient
 │   ├── diarization.py         # pyannote диаризация

@@ -1,10 +1,29 @@
 import os
+from pathlib import Path
 from typing import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
-DATABASE_URL = os.getenv("DATABASE_URL") or "sqlite+aiosqlite:///./data/dialogscribe.db"
+# Security: throwaway CWD-relative dev default — must never look like a real
+# data path; ENVIRONMENT=production requires an explicit DATABASE_URL (settings.py).
+def _default_database_url() -> str:
+    return os.getenv("DATABASE_URL") or "sqlite+aiosqlite:///./dialogscribe-dev.db"
+
+
+DATABASE_URL = _default_database_url()
+
+
+def _ensure_sqlite_parent_dir(url: str) -> None:
+    if not url.startswith("sqlite"):
+        return
+    location = url.split(":///", 1)[-1].split("?", 1)[0]
+    if location in ("", ":memory:"):
+        return
+    Path(location).resolve().parent.mkdir(parents=True, exist_ok=True)
+
+
+_ensure_sqlite_parent_dir(DATABASE_URL)
 
 is_sqlite = DATABASE_URL.startswith("sqlite")
 

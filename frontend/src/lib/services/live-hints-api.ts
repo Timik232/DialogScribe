@@ -11,6 +11,8 @@ export function getLiveHintsWsUrl(): string {
 	return `${protocol}//${window.location.host}/api/live-hints/ws`;
 }
 
+const SOURCE_TAGS: Record<'mic' | 'tab', number> = { mic: 1, tab: 2 };
+
 export class LiveHintsClient {
 	private ws: WebSocket | null = null;
 	private reconnectAttempts = 0;
@@ -27,8 +29,9 @@ export class LiveHintsClient {
 	onFeedbackAck: (ack: { hint_id: string; status: string }) => void = () => {};
 
 	connect(token: string): Promise<void> {
-		const wsUrl = getLiveHintsWsUrl() + "?token=" + token;
+		const wsUrl = getLiveHintsWsUrl();
 		this.ws = new WebSocket(wsUrl);
+		this.ws.binaryType = 'arraybuffer';
 
 		return new Promise((resolve, reject) => {
 			if (!this.ws) {
@@ -36,18 +39,29 @@ export class LiveHintsClient {
 				return;
 			}
 
+			let authed = false;
+
 			this.ws.onopen = () => {
-				this.reconnectAttempts = 0;
-				resolve();
+				this.ws?.send(JSON.stringify({ type: "auth", token, protocol: 1 }));
 			};
 
-			this.ws.onerror = (event) => {
-				reject(new Error("WebSocket connection error"));
+			this.ws.onerror = () => {
+				if (!authed) {
+					reject(new Error("WebSocket connection error"));
+				}
 			};
 
 			this.ws.onmessage = (event) => {
 				try {
 					const data = JSON.parse(event.data);
+					if (!authed) {
+						if (data.type === "auth_ok") {
+							authed = true;
+							this.reconnectAttempts = 0;
+							resolve();
+						}
+						return;
+					}
 					switch (data.type) {
 						case "transcript":
 							this.onTranscript(data);
@@ -73,7 +87,11 @@ export class LiveHintsClient {
 				}
 			};
 
-			this.ws.onclose = () => {
+			this.ws.onclose = (event) => {
+				if (!authed) {
+					reject(new Error(`Live-hints auth failed (code ${event.code})`));
+					return;
+				}
 				if (this.reconnectAttempts < this.maxReconnectAttempts) {
 					this.reconnect();
 				}
@@ -112,14 +130,14 @@ export class LiveHintsClient {
 		);
 	}
 
-	sendAudioChunk(audioB64: string, source: "mic" | "tab"): void {
-		this.ws?.send(
-			JSON.stringify({
-				type: "audio_chunk",
-				audio_b64: audioB64,
-				source: source,
-			}),
-		);
+	sendAudioChunk(audio: ArrayBuffer | Uint8Array, source: "mic" | "tab"): void {
+		if (!this.ws) return;
+		const bytes = audio instanceof Uint8Array ? audio : new Uint8Array(audio);
+		if (bytes.length === 0) return;
+		const framed = new Uint8Array(bytes.length + 1);
+		framed[0] = SOURCE_TAGS[source];
+		framed.set(bytes, 1);
+		this.ws.send(framed);
 	}
 
 	disconnect(): void {

@@ -1,9 +1,10 @@
 services:
   vault-agent:
-    image: hashicorp/vault:1.18
+    image: hashicorp/vault@sha256:5be49781ecf78bfe775c5309c6a4d9f4e9e040b6c885c99eb2b12fb69855e1a2
     container_name: dialogscribe-vault-agent
-    user: "0:0"
+    user: "10002:10003"
     environment:
+      - SKIP_SETCAP=1
       - HOME=/tmp
     volumes:
       - ./vault/agent.hcl:/etc/vault/agent.hcl:ro
@@ -15,31 +16,47 @@ services:
     restart: unless-stopped
     networks:
       - secrets-net
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /etc/vault/secrets/secrets.json"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
 
   dialogscribe-web:
+    image: 192.168.1.47:7002/dialogscribe@sha256:c36fbeaad9147f0a3ba80efde34055e5a0770d57821a56759cfe48268c782e76
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        - HF_TOKEN=${HF_TOKEN:-}
     restart: unless-stopped
-    network_mode: host
+    user: "10001:10003"
+    expose:
+      - "7860"
     runtime: nvidia
     depends_on:
-      - vault-agent
+      vault-agent:
+        condition: service_healthy
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
     command: ["python", "api.py"]
     environment:
+      - ENVIRONMENT=production
+      - VAULT_SECRETS_FILE=/etc/vault/secrets/secrets.json
       - ASR_URL=https://api.mistral.ai
       - ASR_MODEL=voxtral-mini-latest
       - PYANNOTE_MODEL=pyannote/speaker-diarization-3.1
-      - GRADIO_SERVER_NAME=0.0.0.0
-      - GRADIO_SERVER_PORT=7860
-      # GRADIO_USERNAME and GRADIO_PASSWORD are loaded from Vault via entrypoint.sh
-      # Do NOT set them here — they would override Vault values with empty strings
       - PROXY_URL=http://127.0.0.1:7890
+      # Fail-closed secrets: startup ABORTS in production when JWT_SECRET is
+      # missing/short (<32 chars), or when V1_API_ENABLED=true without a
+      # strong API_KEY distinct from JWT_SECRET. JWT_SECRET may come from the
+      # host environment or from Vault (vault/secrets.env.tmpl); API_KEY is
+      # only required when V1_API_ENABLED=true.
+      - JWT_SECRET=${JWT_SECRET:-}
       - API_KEY=${API_KEY:-}
+      - V1_API_ENABLED=${V1_API_ENABLED:-false}
       - MAX_UPLOAD_SIZE_MB=${MAX_UPLOAD_SIZE_MB:-1024}
+      # 600s keeps a single ASR request ≤19.2MB (16kHz-mono WAV); the ASR backend rejects files >25MiB
+      - TRANSCRIPTION_CHUNK_THRESHOLD_SEC=${TRANSCRIPTION_CHUNK_THRESHOLD_SEC:-600}
+      - TRANSCRIPTION_CHUNK_DURATION_SEC=${TRANSCRIPTION_CHUNK_DURATION_SEC:-300}
       - DATABASE_URL=${DATABASE_URL:-}
       - ADMIN_EMAIL=${ADMIN_EMAIL:-}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
@@ -58,9 +75,12 @@ services:
       start_period: 120s
     volumes:
       - ./data:/app/data
-      - ./samples:/app/samples
+      - ./samples:/app/samples:ro
       - ./vault/secrets:/etc/vault/secrets:ro
       - ./entrypoint.sh:/entrypoint.sh:ro
+      - hf-cache:/home/appuser/.cache
+    # host video/render GIDs — verify with ls -l /dev/nvidia*
+    # group_add: ["44", "107"]
     deploy:
       resources:
         reservations:
@@ -69,6 +89,21 @@ services:
               device_ids: ["all"]
               capabilities: [gpu]
 
+  ingress-guard:
+    image: nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
+    container_name: dialogscribe-ingress-guard
+    ports:
+      - "192.168.1.48:7860:80"
+    volumes:
+      - ./deploy/ingress-guard.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      dialogscribe-web:
+        condition: service_healthy
+    restart: unless-stopped
+
 networks:
   secrets-net:
     external: true
+
+volumes:
+  hf-cache:

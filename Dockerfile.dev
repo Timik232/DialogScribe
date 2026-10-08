@@ -1,5 +1,5 @@
 # Lightweight dev image — no frontend build, no torch/pyannote, no GPU
-FROM python:3.10-slim
+FROM python@sha256:fd76ade0c607f27677bc04be3c60749f400eedc941d9e72967e19a4cedff80c2
 
 RUN apt-get update && apt-get install -y \
     ffmpeg \
@@ -25,7 +25,13 @@ COPY api.py ./
 COPY alembic/ ./alembic/
 COPY alembic.ini ./
 
-RUN mkdir -p /app/data
+RUN groupadd -g 10003 secrets \
+    && useradd -u 10001 -g 10003 -m -d /home/appuser appuser \
+    && mkdir -p /app/data /home/appuser/.cache/huggingface \
+    && chown -R 10001:10003 /app /home/appuser
+
+ENV HF_HOME=/home/appuser/.cache/huggingface
+USER 10001
 
 EXPOSE 7860
 

@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { transcriptionStore } from "$lib/stores/transcription";
-	import { fetchApi } from "$lib/services/api";
+	import { fetchApi, fetchApiBlob } from "$lib/services/api";
+	import SafeMarkdown from "$lib/components/SafeMarkdown.svelte";
+	import MindmapViewer from "$lib/components/MindmapViewer.svelte";
 
 	// ── State ──
 
@@ -13,12 +15,10 @@
 	let llmChecked = $state(false);
 
 	let summaryLoading = $state(false);
-	let summaryHtml = $state("");
 	let summaryMarkdown = $state("");
 
 	let mindmapLoading = $state(false);
 	let mindmapMarkdown = $state("");
-	let mindmapHtml = $state("");
 
 	let insightsLoading = $state(false);
 	let allLoading = $state(false);
@@ -94,11 +94,10 @@
 		if (!$transcriptionStore) return;
 		errorMsg = "";
 		summaryLoading = true;
-		summaryHtml = "";
 		summaryMarkdown = "";
 
 		try {
-			const result = await fetchApi<{ summary_markdown: string; summary_html: string }>("POST", "/api/summary", {
+			const result = await fetchApi<{ summary_markdown: string }>("POST", "/api/summary", {
 				body: JSON.stringify({
 					text: $transcriptionStore.text,
 					model: selectedModel || undefined,
@@ -107,7 +106,6 @@
 				headers: { "Content-Type": "application/json" },
 			});
 			summaryMarkdown = result.summary_markdown ?? "";
-			summaryHtml = result.summary_html ?? "";
 		} catch (e: any) {
 			errorMsg = e?.message ?? "Ошибка генерации саммари";
 		} finally {
@@ -120,10 +118,9 @@
 		errorMsg = "";
 		mindmapLoading = true;
 		mindmapMarkdown = "";
-		mindmapHtml = "";
 
 		try {
-			const result = await fetchApi<{ mindmap_markdown: string; mindmap_uid: string; mindmap_html: string }>("POST", "/api/mindmap", {
+			const result = await fetchApi<{ mindmap_markdown: string }>("POST", "/api/mindmap", {
 				body: JSON.stringify({
 					text: $transcriptionStore.text,
 					model: selectedModel || undefined,
@@ -131,7 +128,6 @@
 				headers: { "Content-Type": "application/json" },
 			});
 			mindmapMarkdown = result.mindmap_markdown ?? "";
-			mindmapHtml = result.mindmap_html ?? "";
 		} catch (e: any) {
 			errorMsg = e?.message ?? "Ошибка генерации майндмэпа";
 		} finally {
@@ -142,9 +138,7 @@
 	async function exportSummary(format: string) {
 		if (!summaryMarkdown) return;
 		try {
-			const res = await fetch("/api/export", {
-				method: "POST",
-				credentials: "include",
+			const blob = await fetchApiBlob("POST", "/api/export", {
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({
 					data: {
@@ -157,8 +151,6 @@
 					filename: "summary",
 				}),
 			});
-			if (!res.ok) throw new Error(`Export failed: ${res.status}`);
-			const blob = await res.blob();
 			const ext = format === "docx" ? ".docx" : format === "pdf" ? ".pdf" : ".txt";
 			const url = URL.createObjectURL(blob);
 			const a = document.createElement("a");
@@ -181,7 +173,7 @@
 
 		// Summary
 		try {
-			const result = await fetchApi<{ summary_markdown: string; summary_html: string }>("POST", "/api/summary", {
+			const result = await fetchApi<{ summary_markdown: string }>("POST", "/api/summary", {
 				body: JSON.stringify({
 					text: $transcriptionStore.text,
 					model: selectedModel || undefined,
@@ -190,7 +182,6 @@
 				headers: { "Content-Type": "application/json" },
 			});
 			summaryMarkdown = result.summary_markdown ?? "";
-			summaryHtml = result.summary_html ?? "";
 		} catch (e: any) {
 			errorMsg = e?.message ?? "Ошибка генерации саммари";
 		} finally {
@@ -200,7 +191,7 @@
 		// Mindmap (skip if summary failed)
 		if (!errorMsg) {
 			try {
-				const result = await fetchApi<{ mindmap_markdown: string; mindmap_uid: string; mindmap_html: string }>("POST", "/api/mindmap", {
+				const result = await fetchApi<{ mindmap_markdown: string }>("POST", "/api/mindmap", {
 					body: JSON.stringify({
 						text: $transcriptionStore.text,
 						model: selectedModel || undefined,
@@ -208,7 +199,6 @@
 					headers: { "Content-Type": "application/json" },
 				});
 				mindmapMarkdown = result.mindmap_markdown ?? "";
-				mindmapHtml = result.mindmap_html ?? "";
 			} catch (e: any) {
 				errorMsg = e?.message ?? "Ошибка генерации майндмэпа";
 			} finally {
@@ -314,9 +304,7 @@
 	async function exportInsights(format: string) {
 		if (!insightsData) return;
 		try {
-			const res = await fetch("/api/export-insights", {
-				method: "POST",
-				credentials: "include",
+			const blob = await fetchApiBlob("POST", "/api/export-insights", {
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({
 					action_items: insightsData.action_items ?? [],
@@ -325,8 +313,6 @@
 					format,
 				}),
 			});
-			if (!res.ok) throw new Error(`Export failed: ${res.status}`);
-			const blob = await res.blob();
 			const ext = format === "docx" ? ".docx" : ".txt";
 			const url = URL.createObjectURL(blob);
 			const a = document.createElement("a");
@@ -491,34 +477,30 @@
 				</button>
 			</div>
 
-			{#if summaryHtml || summaryMarkdown}
-				<div class="card result-card">
-					<div class="result-header">
-						<h3>Саммари</h3>
-						<div class="export-buttons">
-							<button class="btn btn-secondary btn-sm" onclick={() => exportSummary("txt")}>TXT</button>
-							<button class="btn btn-secondary btn-sm" onclick={() => exportSummary("docx")}>DOCX</button>
-							<button class="btn btn-secondary btn-sm" onclick={() => exportSummary("pdf")}>PDF</button>
-						</div>
+		{#if summaryMarkdown}
+			<div class="card result-card">
+				<div class="result-header">
+					<h3>Саммари</h3>
+					<div class="export-buttons">
+						<button class="btn btn-secondary btn-sm" onclick={() => exportSummary("txt")}>TXT</button>
+						<button class="btn btn-secondary btn-sm" onclick={() => exportSummary("docx")}>DOCX</button>
+						<button class="btn btn-secondary btn-sm" onclick={() => exportSummary("pdf")}>PDF</button>
 					</div>
-					{#if summaryHtml}
-						<div class="summary-content">{@html summaryHtml}</div>
-					{:else}
-						<pre class="summary-content plain">{summaryMarkdown}</pre>
-					{/if}
 				</div>
-			{/if}
+				<SafeMarkdown class="summary-content" markdown={summaryMarkdown} />
+			</div>
+		{/if}
 
-			{#if mindmapHtml}
-				<div class="card result-card">
-					<div class="result-header">
-						<h3>Майндмэп</h3>
-					</div>
-					<div class="mindmap-wrapper">
-						{@html mindmapHtml}
-					</div>
+		{#if mindmapMarkdown}
+			<div class="card result-card">
+				<div class="result-header">
+					<h3>Майндмэп</h3>
 				</div>
-			{/if}
+				<div class="mindmap-wrapper">
+					<MindmapViewer markdown={mindmapMarkdown} />
+				</div>
+			</div>
+		{/if}
 
 			{#if insightsData}
 				<div class="card result-card">
@@ -623,9 +605,9 @@
 					{:else}
 						{#each chatMessages as msg}
 							<div class="chat-bubble" class:chat-bubble-user={msg.role === "user"} class:chat-bubble-assistant={msg.role === "assistant"}>
-								{#if msg.role === "assistant"}
-									<div class="chat-bubble-content">{@html msg.content}</div>
-								{:else}
+							{#if msg.role === "assistant"}
+								<SafeMarkdown class="chat-bubble-content" markdown={msg.content} />
+							{:else}
 									<div class="chat-bubble-content">{msg.content}</div>
 								{/if}
 							</div>
@@ -869,15 +851,6 @@
 
 	.summary-content :global(p) {
 		margin-bottom: 0.5rem;
-	}
-
-	.summary-content.plain {
-		white-space: pre-wrap;
-		word-break: break-word;
-		background: var(--color-bg);
-		padding: 1rem;
-		border-radius: var(--radius-sm);
-		font-family: var(--font-family);
 	}
 
 	.mindmap-wrapper {

@@ -72,11 +72,29 @@ class TestRegisterLoginFlow:
 
 class TestTokenRefreshFlow:
     def test_refresh_returns_new_access_token(self, client, mock_db):
+        from datetime import datetime, timedelta
+
+        from gigaam_transcriber.models import RefreshSession
+
         user = _make_user()
-        mock_db.execute.return_value = MagicMock(scalar_one_or_none=lambda: user)
+        session = MagicMock(spec=RefreshSession)
+        session.revoked_at = None
+        session.rotated_to_hashed_jti = None
+        session.expires_at = datetime.utcnow() + timedelta(days=7)
+        session.user_id = user.id
+
+        results = [
+            MagicMock(scalar_one_or_none=lambda: session),
+            MagicMock(scalar_one_or_none=lambda: user),
+        ]
+        mock_db.execute = AsyncMock(side_effect=results)
 
         refresh_token = create_refresh_token(user.id)
-        resp = client.post("/api/auth/refresh", cookies={"refresh_token": refresh_token})
+        resp = client.post(
+            "/api/auth/refresh",
+            cookies={"refresh_token": refresh_token, "csrf_token": "csrf-1"},
+            headers={"X-CSRF-Token": "csrf-1"},
+        )
         assert resp.status_code == 200
         assert "access_token" in resp.json()
 

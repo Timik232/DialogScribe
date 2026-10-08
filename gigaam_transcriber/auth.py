@@ -11,10 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from gigaam_transcriber.database import get_db
 from gigaam_transcriber.models import User
+from gigaam_transcriber.settings import JWT_SECRET
 
-JWT_SECRET = os.getenv("JWT_SECRET") or os.getenv("API_KEY") or ""
-if not JWT_SECRET:
-    raise RuntimeError("JWT_SECRET or API_KEY environment variable must be set")
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 15
 REFRESH_TOKEN_EXPIRE_DAYS = 7
@@ -42,16 +40,42 @@ def create_access_token(user_id: str, role: str) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-def create_refresh_token(user_id: str) -> str:
+def create_refresh_token(user_id: str, jti: str | None = None) -> str:
     expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
     payload = {
         "sub": user_id,
         "type": "refresh",
-        "jti": str(uuid.uuid4()),
+        "jti": jti or str(uuid.uuid4()),
         "exp": expire,
         "iat": datetime.utcnow(),
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+class TokenValidationError(ValueError):
+    """A JWT failed validation (signature, expiry, or token type).
+
+    Transport-agnostic counterpart of the 401 ``HTTPException`` raised by the
+    HTTP dependency: WebSocket and other non-HTTP callers map this onto their
+    own failure signalling (e.g. close code 4401).
+    """
+
+
+def decode_access_token(token: str) -> dict:
+    """Validate an access JWT and return its payload without HTTP coupling.
+
+    Checks signature, expiry, ``type == "access"`` and presence of ``sub``.
+    Raises :class:`TokenValidationError` on any failure.
+    """
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except JWTError as exc:
+        raise TokenValidationError("Invalid or expired token") from exc
+    if payload.get("type") != "access":
+        raise TokenValidationError("Invalid token type")
+    if not payload.get("sub"):
+        raise TokenValidationError("Invalid token payload")
+    return payload
 
 
 def decode_token(token: str) -> dict:
@@ -62,29 +86,23 @@ def decode_token(token: str) -> dict:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from None
 
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    payload = decode_token(credentials.credentials)
-
-    if payload.get("type") != "access":
+    try:
+        payload = decode_access_token(credentials.credentials)
+    except TokenValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token type",
+            detail=str(exc),
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from exc
 
-    user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token payload",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    user_id = payload["sub"]
 
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
@@ -94,7 +112,7 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found",
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from None
 
     if not user.is_active:
         raise HTTPException(

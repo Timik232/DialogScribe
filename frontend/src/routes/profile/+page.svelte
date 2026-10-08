@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { authStore } from '$lib/stores/auth';
 	import { fetchApi } from '$lib/services/api';
+	import AsrProviderSelect from '$lib/components/AsrProviderSelect.svelte';
 	import { goto } from '$app/navigation';
 
 	interface UsageStat {
@@ -22,35 +23,6 @@
 	let limits: LimitInfo[] = $state([]);
 	let loading = $state(true);
 	let period = $state('monthly');
-	let asrProvider = $state('mistral');
-	let asrProviderLoading = $state(true);
-	let asrProviderMsg = $state<{ text: string; type: 'success' | 'error' } | null>(null);
-
-	async function loadAsrProvider() {
-		asrProviderLoading = true;
-		try {
-			const data = await fetchApi<{ provider: string }>('GET', '/api/settings/asr-provider');
-			asrProvider = data.provider || 'mistral';
-		} catch {
-			asrProvider = 'mistral';
-		} finally {
-			asrProviderLoading = false;
-		}
-	}
-
-	async function saveAsrProvider() {
-		asrProviderMsg = null;
-		try {
-			await fetchApi('PUT', '/api/settings/asr-provider', {
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ provider: asrProvider })
-			});
-			asrProviderMsg = { text: 'Сохранено', type: 'success' };
-		} catch (e: any) {
-			asrProviderMsg = { text: e?.message || 'Ошибка сохранения', type: 'error' };
-		}
-		setTimeout(() => { asrProviderMsg = null; }, 3000);
-	}
 
 	async function loadUsage() {
 		loading = true;
@@ -68,7 +40,6 @@
 
 	onMount(() => {
 		loadUsage();
-		loadAsrProvider();
 	});
 
 	async function handleLogout() {
@@ -172,16 +143,8 @@
 		<div class="asr-section">
 			<h2>Провайдер распознавания речи</h2>
 			<div class="asr-row">
-				<select bind:value={asrProvider} onchange={saveAsrProvider} disabled={asrProviderLoading}>
-					<option value="mistral">Mistral</option>
-					<option value="litellm">GigaAM</option>
-				</select>
+				<AsrProviderSelect />
 			</div>
-			{#if asrProviderMsg}
-				<p class="asr-msg" class:asr-msg-success={asrProviderMsg.type === 'success'} class:asr-msg-error={asrProviderMsg.type === 'error'}>
-					{asrProviderMsg.text}
-				</p>
-			{/if}
 		</div>
 
 		<button class="logout-btn" onclick={handleLogout}>Выйти</button>

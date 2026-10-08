@@ -1,0 +1,11 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Public vulnerability and distribution advisory identifiers in the audit matrix"
+regexTarget = "secret"
+regexes = [
+  '''TEMP-\d+-[A-F0-9]+''',
+  '''[A-Z]+-\d{4}-\d+''',
+  '''GHSA-[0-9a-z]+-[0-9a-z]+-[0-9a-z]+''',
+]

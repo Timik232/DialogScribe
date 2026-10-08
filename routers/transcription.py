@@ -1,8 +1,4 @@
 import asyncio
-import logging
-import os
-import tempfile
-from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
@@ -15,18 +11,16 @@ from gigaam_transcriber.data_models import TranscriptionResult
 from gigaam_transcriber.database import get_db
 from gigaam_transcriber.models import User, UserSettings
 from gigaam_transcriber.limits import check_limit
+from gigaam_transcriber.rate_limit import user_rate_limit
 from gigaam_transcriber.usage import track_usage
 
 from routers._helpers import (
-    SUPPORTED_EXTENSIONS,
     _handle_transcription_exception,
     _map_diarization,
-    logger,
 )
+from routers._uploads import spool_upload
 
 router = APIRouter(prefix="/api", tags=["transcription"])
-
-MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "1024"))
 
 
 def _segment_to_json(segment) -> dict:
@@ -51,41 +45,15 @@ def _transcribe_upload(
     *,
     provider_preference: str | None = None,
 ) -> dict:
-    filename = file.filename or ""
-    file_ext = Path(filename).suffix.lower()
-
-    if file_ext not in SUPPORTED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file format: '{file_ext or 'unknown'}'",
-        )
-
-    max_size_bytes = MAX_UPLOAD_SIZE_MB * 1024 * 1024
-    tmp_path: str | None = None
-
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
-            tmp_path = tmp_file.name
-            size = 0
-            while True:
-                chunk = file.file.read(1024 * 1024)
-                if not chunk:
-                    break
-                size += len(chunk)
-                if size > max_size_bytes:
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"File too large. Maximum allowed is {MAX_UPLOAD_SIZE_MB}MB",
-                    )
-                tmp_file.write(chunk)
-
-        result: TranscriptionResult = transcriber.transcribe(
-            input_path=tmp_path,
-            diarization=_map_diarization(diarization_mode),
-            language=language or "ru",
-            denoise=denoise or "none",
-            provider_preference=provider_preference,
-        )
+        with spool_upload(file) as tmp_path:
+            result: TranscriptionResult = transcriber.transcribe(
+                input_path=tmp_path,
+                diarization=_map_diarization(diarization_mode),
+                language=language or "ru",
+                denoise=denoise or "none",
+                provider_preference=provider_preference,
+            )
         return {
             "segments": [_segment_to_json(seg) for seg in result.segments],
             "duration": result.duration,
@@ -96,15 +64,9 @@ def _transcribe_upload(
         raise
     except Exception as e:
         raise _handle_transcription_exception(e)
-    finally:
-        try:
-            if tmp_path and os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-        except Exception:
-            logger.warning("Failed to remove temp file: %s", tmp_path)
 
 
-@router.post("/transcribe")
+@router.post("/transcribe", dependencies=[Depends(user_rate_limit("upload"))])
 async def transcribe(
     request: Request,
     file: Annotated[UploadFile, File()],
@@ -130,7 +92,7 @@ async def transcribe(
     return result
 
 
-@router.post("/transcribe/microphone")
+@router.post("/transcribe/microphone", dependencies=[Depends(user_rate_limit("upload"))])
 async def transcribe_microphone(
     request: Request,
     file: Annotated[UploadFile, File()],

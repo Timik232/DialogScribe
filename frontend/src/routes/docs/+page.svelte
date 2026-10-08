@@ -3,6 +3,7 @@
 	import ApiEndpoint from '$lib/components/docs/ApiEndpoint.svelte';
 	import CodeExample from '$lib/components/docs/CodeExample.svelte';
 	import { endpoints, faqItems } from '$lib/components/docs/data';
+	import { sanitizeBlockHtml } from '$lib/services/safeHtml';
 
 	let expandedFaq = $state<number | null>(null);
 
@@ -205,8 +206,7 @@
   "result": {
     "transcription": { "segments": [...], "text": "..." },
     "summary": { "summary_markdown": "..." },
-    "mindmap_html": "...",
-    "mindmap_md": "...",
+    "mindmap_md": "# Тема...",
     "action_items": [...],
     "suggested_steps": [...],
     "errors": [],
@@ -291,11 +291,14 @@
 								<polyline points="6 9 12 15 18 9"/>
 							</svg>
 						</button>
-						{#if expandedFaq === index}
-							<div class="faq-answer">
-								{@html item.answer}
-							</div>
-						{/if}
+					{#if expandedFaq === index}
+						<div class="faq-answer">
+							<!-- SECURITY: item.answer is compile-time static content from
+							     $lib/components/docs/data.ts (never user/LLM input), but it is
+							     still sanitized through the shared allowlist as defense in depth. -->
+							{@html sanitizeBlockHtml(item.answer)}
+						</div>
+					{/if}
 					</div>
 				{/each}
 			</div>

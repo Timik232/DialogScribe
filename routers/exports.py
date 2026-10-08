@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import tempfile
@@ -27,6 +28,8 @@ CONTENT_TYPES: Dict[str, str] = {
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "pdf": "application/pdf",
 }
+
+_EXPORT_FAILED_DETAIL = "Export generation failed. Please try again."
 
 
 class ExportRequest(BaseModel):
@@ -83,8 +86,30 @@ def _result_from_dict(obj: Dict[str, Any], speaker_names: Dict[str, str] | None 
 def _cleanup(path: str) -> None:
     try:
         os.unlink(path)
-    except OSError:
+    except FileNotFoundError:
         pass
+    except OSError as exc:
+        logger.error("Failed to remove export tempfile: %s", exc)
+
+
+class _ExportFileResponse(FileResponse):
+    """FileResponse that removes the export tempfile on every exit path.
+
+    Starlette runs ``background`` only after a fully streamed response; when
+    the client aborts mid-download the background task never runs, so this
+    subclass unlinks in a ``finally`` guard too. Both paths delete strictly
+    after FileResponse has finished reading the file.
+    """
+
+    def __init__(self, *args: Any, cleanup_path: str, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._cleanup_path = cleanup_path
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            _cleanup(self._cleanup_path)
 
 
 @router.post("/export")
@@ -100,39 +125,50 @@ async def export_transcription(
             detail=f"Unsupported format '{fmt}'. Supported: {', '.join(SUPPORTED_FORMATS)}",
         )
 
-    result = _result_from_dict(body.data, body.speaker_names)
+    try:
+        result = _result_from_dict(body.data, body.speaker_names)
+    except Exception:
+        logger.exception("Invalid transcription payload for export")
+        raise HTTPException(status_code=422, detail="Invalid transcription payload") from None
+
     ext_map = {"json": ".json", "srt": ".srt", "vtt": ".vtt", "txt": ".txt", "docx": ".docx", "pdf": ".pdf"}
     ext = ext_map[fmt]
 
-    fd, tmp = tempfile.mkstemp(suffix=ext)
-    os.close(fd)
-
-    if fmt in ("docx", "pdf"):
-        path = Path(tmp)
-        path.unlink(missing_ok=True)
-        actual = path.with_suffix(ext)
-        if fmt == "docx":
-            export_docx_transcription(result, str(actual))
-        else:
-            export_pdf_transcription(result, str(actual))
-        tmp = str(actual)
-
+    tmp: str | None = None
     try:
-        if fmt in ("json", "srt", "vtt", "txt"):
+        fd, tmp = tempfile.mkstemp(suffix=ext)
+        os.close(fd)
+
+        if fmt in ("docx", "pdf"):
+            if fmt == "docx":
+                await asyncio.to_thread(export_docx_transcription, result, tmp)
+            else:
+                await asyncio.to_thread(export_pdf_transcription, result, tmp)
+        else:
             content = result.to_json() if fmt == "json" else result.to_txt() if fmt == "txt" else result.to_srt() if fmt == "srt" else result.to_vtt()
             Path(tmp).write_text(content, encoding="utf-8")
-    except Exception:
-        _cleanup(tmp)
+
+        if not Path(tmp).exists():
+            raise OSError("exporter produced no output file")
+    except asyncio.CancelledError:
+        if tmp:
+            _cleanup(tmp)
         raise
+    except Exception:
+        logger.exception("Export generation failed (format=%s)", fmt)
+        if tmp:
+            _cleanup(tmp)
+        raise HTTPException(status_code=502, detail=_EXPORT_FAILED_DETAIL) from None
 
     filename = f"{body.filename}{ext}"
     background_tasks.add_task(_cleanup, tmp)
 
-    return FileResponse(
+    return _ExportFileResponse(
         path=tmp,
         filename=filename,
         media_type=CONTENT_TYPES[fmt],
         background=background_tasks,
+        cleanup_path=tmp,
     )
 
 
@@ -144,27 +180,50 @@ async def export_insights(
 ) -> FileResponse:
     fmt = body.format.lower()
     if fmt not in ("txt", "docx"):
-        raise HTTPException(status_code=400, detail=f"Unsupported format '{fmt}'. Supported: txt, docx")
+        raise HTTPException(status_code=400, detail="Unsupported format '{fmt}'. Supported: txt, docx")
 
     from gigaam_transcriber.insights import export_insights_txt
 
     ext = ".txt" if fmt == "txt" else ".docx"
-    fd, tmp = tempfile.mkstemp(suffix=ext)
-    os.close(fd)
+    tmp: str | None = None
+    try:
+        fd, tmp = tempfile.mkstemp(suffix=ext)
+        os.close(fd)
 
-    if fmt == "docx":
-        Path(tmp).unlink(missing_ok=True)
-        tmp_docx = tmp if tmp.endswith(".docx") else tmp + ".docx"
-        export_docx_insights(body.action_items, body.decisions, body.suggested_steps, tmp_docx)
-        tmp = tmp_docx
-    else:
-        content = export_insights_txt(body.action_items, body.decisions, body.suggested_steps)
-        Path(tmp).write_text(content, encoding="utf-8")
+        if fmt == "docx":
+            await asyncio.to_thread(
+                export_docx_insights,
+                body.action_items,
+                body.decisions,
+                body.suggested_steps,
+                tmp,
+            )
+        else:
+            content = await asyncio.to_thread(
+                export_insights_txt,
+                body.action_items,
+                body.decisions,
+                body.suggested_steps,
+            )
+            Path(tmp).write_text(content, encoding="utf-8")
+
+        if not Path(tmp).exists():
+            raise OSError("exporter produced no output file")
+    except asyncio.CancelledError:
+        if tmp:
+            _cleanup(tmp)
+        raise
+    except Exception:
+        logger.exception("Insights export generation failed (format=%s)", fmt)
+        if tmp:
+            _cleanup(tmp)
+        raise HTTPException(status_code=502, detail=_EXPORT_FAILED_DETAIL) from None
 
     background_tasks.add_task(_cleanup, tmp)
-    return FileResponse(
+    return _ExportFileResponse(
         path=tmp,
         filename=f"insights{ext}",
         media_type=CONTENT_TYPES.get(fmt, "text/plain"),
         background=background_tasks,
+        cleanup_path=tmp,
     )

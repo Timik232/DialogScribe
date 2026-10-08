@@ -101,6 +101,16 @@ def pytest_configure(config):
     )
 
 
+@pytest.fixture(autouse=True)
+def _reset_rate_limits():
+    """Isolate in-memory rate-limit buckets between tests (Task 7)."""
+    from gigaam_transcriber import rate_limit
+
+    rate_limit.reset_all()
+    yield
+    rate_limit.reset_all()
+
+
 def make_mock_user():
     from gigaam_transcriber.models import User
 

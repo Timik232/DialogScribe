@@ -4,6 +4,7 @@ import pytest
 
 from gigaam_transcriber.context_utils import (
     estimate_tokens,
+    estimate_tokens_accurate,
     find_relevant_chunks,
     get_context_budget,
     get_model_context_limit,
@@ -203,3 +204,43 @@ class TestFindRelevantChunks:
         ]
         result = find_relevant_chunks(chunks, "database architecture", max_chunks=2)
         assert len(result) == 2
+
+
+# ===== Unified chunking tests =====
+
+
+class TestUnifiedChunkingModelParam:
+    """Tests for split_into_chunks with model parameter (T7)."""
+
+    def test_model_parameter_accurate(self):
+        """When model is provided, uses estimate_tokens_accurate instead of estimate_tokens."""
+        text = ". ".join([f"Предложение номер {i} для проверки" for i in range(200)])
+        chunks_heuristic = split_into_chunks(text, max_tokens=100)
+        chunks_accurate = split_into_chunks(text, max_tokens=100, model="gpt-4o")
+        # Both should split, but possibly differently due to different token estimation
+        assert len(chunks_heuristic) > 1
+        assert len(chunks_accurate) > 1
+
+    def test_model_param_short_text_single_chunk(self):
+        """Short text returns single chunk regardless of model param."""
+        text = "Короткий текст."
+        chunks = split_into_chunks(text, max_tokens=10000, model="gpt-4o")
+        assert chunks == [text]
+
+    def test_model_param_empty_string(self):
+        chunks = split_into_chunks("", max_tokens=100, model="gpt-4o")
+        assert chunks == []
+
+    def test_model_param_newline_splitting(self):
+        """Newlines are split correctly with model param."""
+        text = "\n".join([f"Строка {i} с содержанием для проверки" for i in range(200)])
+        chunks = split_into_chunks(text, max_tokens=100, model="gpt-4o")
+        assert len(chunks) > 1
+
+    def test_model_param_overlap_preserved(self):
+        text = ". ".join([f"Предложение {i}" for i in range(100)])
+        chunks = split_into_chunks(text, max_tokens=100, overlap_sentences=2, model="gpt-4o")
+        if len(chunks) > 1:
+            last_of_first = chunks[0].split(". ")[-2:]
+            next_start = ". ".join(last_of_first)
+            assert next_start in chunks[1] or chunks[1].startswith(last_of_first[0])

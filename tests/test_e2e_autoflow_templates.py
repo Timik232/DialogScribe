@@ -92,7 +92,7 @@ class TestE2E_AutoflowFull:
         assert result.transcription_result is not None
         assert result.transcription_result.text != ""
         assert result.summary_text != ""
-        assert result.mindmap_html != ""
+        assert not hasattr(result, "mindmap_html")
         assert result.mindmap_md != ""
         assert result.errors == []
         assert "transcription" in result.stage_timings
@@ -140,7 +140,8 @@ class TestE2E_AutoflowPartial:
 
         assert result.transcription_result is not None
         assert result.summary_text == ""
-        assert result.mindmap_html == ""
+        assert result.mindmap_md == ""
+        assert not hasattr(result, "mindmap_html")
         assert len(result.errors) > 0
         assert any("Саммари" in e for e in result.errors)
 

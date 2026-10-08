@@ -51,6 +51,9 @@
 			{/if}
 		</button>
 	</div>
+	<!-- SECURITY: `highlighted` derives from compile-time static code strings
+	     (docs/data.ts) and is escaped (& < >) before any span wrapping, so it
+	     cannot carry active markup. Static docs-site sink, reviewed. -->
 	<pre><code>{@html highlighted}</code></pre>
 </div>
 

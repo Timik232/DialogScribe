@@ -1,5 +1,5 @@
 # Stage 1: Build SvelteKit frontend
-FROM node:20-slim AS frontend-build
+FROM node@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS frontend-build
 
 WORKDIR /app/frontend
 
@@ -10,9 +10,9 @@ COPY frontend/ ./
 RUN npm run build
 
 # Stage 2: Python runtime (production)
-FROM python:3.10-slim
+FROM python@sha256:fd76ade0c607f27677bc04be3c60749f400eedc941d9e72967e19a4cedff80c2
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libpango-1.0-0 \
     libpangocairo-1.0-0 \
@@ -30,19 +30,32 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
-ARG HF_TOKEN
-ENV HF_TOKEN=${HF_TOKEN}
-RUN python -c "from pyannote.audio import Pipeline; Pipeline.from_pretrained('pyannote/speaker-diarization-3.1', use_auth_token='${HF_TOKEN}')" || true
-
 COPY gigaam_transcriber/ ./gigaam_transcriber/
 COPY pyproject.toml ./
 COPY routers/ ./routers/
 COPY api.py ./
 COPY alembic/ ./alembic/
 COPY alembic.ini ./
+COPY scripts/entrypoint_secrets.py /app/scripts/entrypoint_secrets.py
 
 # Copy built frontend from Stage 1
 COPY --from=frontend-build /app/frontend/build /app/frontend/build
+
+RUN groupadd -g 10003 secrets \
+    && useradd -u 10001 -g 10003 -m -d /home/appuser appuser \
+    && mkdir -p /app/data /home/appuser/.cache \
+    && chown -R 10001:10003 /app /home/appuser
+
+# Model caches (pyannote uses torch.hub cache, speechbrain/hf use HF_HOME) live
+# under /home/appuser/.cache — mount a named volume on the whole directory so
+# warm caches survive restarts and enable offline start.
+ENV HF_HOME=/home/appuser/.cache/huggingface
+# torch>=2.6 defaults weights_only=True which rejects the pickled
+# TorchVersion/task-spec globals inside the trusted pinned public model
+# revisions (pyannote/speaker-diarization-3.1, speechbrain/spkrec-ecapa-
+# voxceleb); see diarization.py loaders — never load untrusted checkpoints.
+ENV TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
+USER 10001
 
 EXPOSE 7860
 

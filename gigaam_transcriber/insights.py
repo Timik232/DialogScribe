@@ -13,6 +13,7 @@ from typing import Optional
 from gigaam_transcriber.summarizer import LLMClient
 from gigaam_transcriber.context_utils import (
     estimate_tokens,
+    estimate_tokens_accurate,
     get_context_budget,
     get_model_context_limit,
     split_into_chunks,
@@ -159,7 +160,7 @@ def _parse_json_response(raw: str) -> dict:
 # Core extraction functions
 # ---------------------------------------------------------------------------
 
-def extract_action_items(text: str, llm_client: LLMClient) -> dict:
+def extract_action_items(text: str, llm_client: LLMClient, model: Optional[str] = None) -> dict:
     """Extract action items and decisions from transcription text.
 
     Uses map-reduce for long texts that exceed 50% of the model's context.
@@ -167,23 +168,24 @@ def extract_action_items(text: str, llm_client: LLMClient) -> dict:
     if not text or not text.strip():
         return {"action_items": [], "decisions": []}
 
-    model = llm_client.config.model
-    budget = get_context_budget(model, ACTION_ITEMS_SYSTEM_PROMPT, text)
+    effective_model = model or llm_client.config.model
+    budget = get_context_budget(effective_model, ACTION_ITEMS_SYSTEM_PROMPT, text)
 
     if budget["needs_compression"]:
-        return _extract_action_items_map_reduce(text, llm_client, budget)
+        return _extract_action_items_map_reduce(text, llm_client, budget, model=model)
 
     try:
-        raw = llm_client.call(ACTION_ITEMS_SYSTEM_PROMPT, text)
+        raw = llm_client.call(ACTION_ITEMS_SYSTEM_PROMPT, text, model_override=model)
     except Exception as e:
-        logger.error("LLM call failed for action items: %s", e)
+        logger.error("LLM call failed for action items: %s", type(e).__name__, exc_info=True)
         raise
 
     return _validate_action_items(raw)
 
 
-def _extract_action_items_map_reduce(text: str, llm_client: LLMClient, budget: dict) -> dict:
+def _extract_action_items_map_reduce(text: str, llm_client: LLMClient, budget: dict, model: Optional[str] = None) -> dict:
     """Map-reduce extraction of action items from long text."""
+    effective_model = model or llm_client.config.model
     chunk_max_tokens = min(3000, budget["total"] // 4)
     chunks = split_into_chunks(text, max_tokens=chunk_max_tokens)
     logger.info("Map-reduce action items: %d chunks", len(chunks))
@@ -192,7 +194,7 @@ def _extract_action_items_map_reduce(text: str, llm_client: LLMClient, budget: d
     for i, chunk in enumerate(chunks):
         logger.debug("Extracting action items from chunk %d/%d", i + 1, len(chunks))
         try:
-            raw = llm_client.call(ACTION_ITEMS_SYSTEM_PROMPT, chunk)
+            raw = llm_client.call(ACTION_ITEMS_SYSTEM_PROMPT, chunk, model_override=model)
             all_raw_items.append(raw)
         except Exception as e:
             logger.warning("Failed to extract from chunk %d: %s", i + 1, e)
@@ -201,13 +203,68 @@ def _extract_action_items_map_reduce(text: str, llm_client: LLMClient, budget: d
         return {"action_items": [], "decisions": []}
 
     combined = "\n\n---\n\n".join(all_raw_items)
-    try:
-        reduced = llm_client.call(ACTION_ITEMS_REDUCE_PROMPT, combined)
-    except Exception as e:
-        logger.error("Reduce step failed for action items: %s", e)
+    budget_check = get_context_budget(
+        effective_model, ACTION_ITEMS_REDUCE_PROMPT, combined,
+    )
+
+    if budget_check["available"] >= estimate_tokens_accurate(combined, effective_model):
+        logger.info(
+            "Action items reduce: %d chunks, %d tokens, strategy=simple",
+            len(all_raw_items),
+            budget_check["used_text"],
+        )
+        try:
+            reduced = llm_client.call(ACTION_ITEMS_REDUCE_PROMPT, combined, model_override=model)
+        except Exception as e:
+            logger.error("Reduce step failed for action items: %s", type(e).__name__, exc_info=True)
+            return _validate_action_items(all_raw_items[0])
+        return _validate_action_items(reduced)
+
+    logger.info(
+        "Action items reduce: %d chunks, %d tokens, strategy=hierarchical",
+        len(all_raw_items),
+        budget_check["used_text"],
+    )
+    prompt_tokens = estimate_tokens_accurate(ACTION_ITEMS_REDUCE_PROMPT, effective_model)
+    available_per_group = budget_check["total"] - prompt_tokens - budget_check["output_reserve"]
+
+    items_per_group = 1
+    for size in range(len(all_raw_items), 0, -1):
+        test_combined = "\n\n---\n\n".join(all_raw_items[:size])
+        if estimate_tokens_accurate(test_combined, effective_model) <= available_per_group:
+            items_per_group = size
+            break
+
+    sub_results: list[str] = []
+    for i in range(0, len(all_raw_items), items_per_group):
+        group = all_raw_items[i : i + items_per_group]
+        group_combined = "\n\n---\n\n".join(group)
+        try:
+            sub_result = llm_client.call(ACTION_ITEMS_REDUCE_PROMPT, group_combined, model_override=model)
+            sub_results.append(sub_result)
+        except Exception as e:
+            logger.warning("Sub-group reduce failed: %s", type(e).__name__, exc_info=True)
+            sub_results.append(group[0])
+
+    if not sub_results:
         return _validate_action_items(all_raw_items[0])
 
-    return _validate_action_items(reduced)
+    final_combined = "\n\n---\n\n".join(sub_results)
+    final_check = get_context_budget(
+        effective_model, ACTION_ITEMS_REDUCE_PROMPT, final_combined,
+    )
+    if final_check["available"] >= estimate_tokens_accurate(final_combined, effective_model):
+        try:
+            reduced = llm_client.call(ACTION_ITEMS_REDUCE_PROMPT, final_combined, model_override=model)
+        except Exception as e:
+            logger.error("Final reduce failed for action items: %s", type(e).__name__, exc_info=True)
+            return _validate_action_items(sub_results[0])
+        return _validate_action_items(reduced)
+
+    raise ValueError(
+        f"Text too long for context: {final_check['used_text']} tokens needed, "
+        f"{final_check['available']} available (model={effective_model})"
+    )
 
 
 def _validate_action_items(raw: str) -> dict:
@@ -248,7 +305,7 @@ def _validate_action_items(raw: str) -> dict:
     return {"action_items": validated_items, "decisions": validated_decisions}
 
 
-def generate_suggested_steps(text: str, llm_client: LLMClient) -> dict:
+def generate_suggested_steps(text: str, llm_client: LLMClient, model: Optional[str] = None) -> dict:
     """Generate suggested next steps from transcription text.
 
     Uses map-reduce for long texts that exceed 50% of the model's context.
@@ -256,23 +313,24 @@ def generate_suggested_steps(text: str, llm_client: LLMClient) -> dict:
     if not text or not text.strip():
         return {"suggested_steps": []}
 
-    model = llm_client.config.model
-    budget = get_context_budget(model, SUGGESTED_STEPS_SYSTEM_PROMPT, text)
+    effective_model = model or llm_client.config.model
+    budget = get_context_budget(effective_model, SUGGESTED_STEPS_SYSTEM_PROMPT, text)
 
     if budget["needs_compression"]:
-        return _generate_steps_map_reduce(text, llm_client, budget)
+        return _generate_steps_map_reduce(text, llm_client, budget, model=model)
 
     try:
-        raw = llm_client.call(SUGGESTED_STEPS_SYSTEM_PROMPT, text)
+        raw = llm_client.call(SUGGESTED_STEPS_SYSTEM_PROMPT, text, model_override=model)
     except Exception as e:
-        logger.error("LLM call failed for suggested steps: %s", e)
+        logger.error("LLM call failed for suggested steps: %s", type(e).__name__, exc_info=True)
         raise
 
     return _validate_suggested_steps(raw)
 
 
-def _generate_steps_map_reduce(text: str, llm_client: LLMClient, budget: dict) -> dict:
+def _generate_steps_map_reduce(text: str, llm_client: LLMClient, budget: dict, model: Optional[str] = None) -> dict:
     """Map-reduce generation of suggested steps from long text."""
+    effective_model = model or llm_client.config.model
     chunk_max_tokens = min(3000, budget["total"] // 4)
     chunks = split_into_chunks(text, max_tokens=chunk_max_tokens)
     logger.info("Map-reduce suggested steps: %d chunks", len(chunks))
@@ -281,7 +339,7 @@ def _generate_steps_map_reduce(text: str, llm_client: LLMClient, budget: dict) -
     for i, chunk in enumerate(chunks):
         logger.debug("Generating steps from chunk %d/%d", i + 1, len(chunks))
         try:
-            raw = llm_client.call(SUGGESTED_STEPS_SYSTEM_PROMPT, chunk)
+            raw = llm_client.call(SUGGESTED_STEPS_SYSTEM_PROMPT, chunk, model_override=model)
             all_raw_steps.append(raw)
         except Exception as e:
             logger.warning("Failed to generate steps from chunk %d: %s", i + 1, e)
@@ -290,13 +348,68 @@ def _generate_steps_map_reduce(text: str, llm_client: LLMClient, budget: dict) -
         return {"suggested_steps": []}
 
     combined = "\n\n---\n\n".join(all_raw_steps)
-    try:
-        reduced = llm_client.call(SUGGESTED_STEPS_REDUCE_PROMPT, combined)
-    except Exception as e:
-        logger.error("Reduce step failed for suggested steps: %s", e)
+    budget_check = get_context_budget(
+        effective_model, SUGGESTED_STEPS_REDUCE_PROMPT, combined,
+    )
+
+    if budget_check["available"] >= estimate_tokens_accurate(combined, effective_model):
+        logger.info(
+            "Steps reduce: %d chunks, %d tokens, strategy=simple",
+            len(all_raw_steps),
+            budget_check["used_text"],
+        )
+        try:
+            reduced = llm_client.call(SUGGESTED_STEPS_REDUCE_PROMPT, combined, model_override=model)
+        except Exception as e:
+            logger.error("Reduce step failed for suggested steps: %s", type(e).__name__, exc_info=True)
+            return _validate_suggested_steps(all_raw_steps[0])
+        return _validate_suggested_steps(reduced)
+
+    logger.info(
+        "Steps reduce: %d chunks, %d tokens, strategy=hierarchical",
+        len(all_raw_steps),
+        budget_check["used_text"],
+    )
+    prompt_tokens = estimate_tokens_accurate(SUGGESTED_STEPS_REDUCE_PROMPT, effective_model)
+    available_per_group = budget_check["total"] - prompt_tokens - budget_check["output_reserve"]
+
+    steps_per_group = 1
+    for size in range(len(all_raw_steps), 0, -1):
+        test_combined = "\n\n---\n\n".join(all_raw_steps[:size])
+        if estimate_tokens_accurate(test_combined, effective_model) <= available_per_group:
+            steps_per_group = size
+            break
+
+    sub_results: list[str] = []
+    for i in range(0, len(all_raw_steps), steps_per_group):
+        group = all_raw_steps[i : i + steps_per_group]
+        group_combined = "\n\n---\n\n".join(group)
+        try:
+            sub_result = llm_client.call(SUGGESTED_STEPS_REDUCE_PROMPT, group_combined, model_override=model)
+            sub_results.append(sub_result)
+        except Exception as e:
+            logger.warning("Sub-group reduce failed: %s", type(e).__name__, exc_info=True)
+            sub_results.append(group[0])
+
+    if not sub_results:
         return _validate_suggested_steps(all_raw_steps[0])
 
-    return _validate_suggested_steps(reduced)
+    final_combined = "\n\n---\n\n".join(sub_results)
+    final_check = get_context_budget(
+        effective_model, SUGGESTED_STEPS_REDUCE_PROMPT, final_combined,
+    )
+    if final_check["available"] >= estimate_tokens_accurate(final_combined, effective_model):
+        try:
+            reduced = llm_client.call(SUGGESTED_STEPS_REDUCE_PROMPT, final_combined, model_override=model)
+        except Exception as e:
+            logger.error("Final reduce failed for suggested steps: %s", type(e).__name__, exc_info=True)
+            return _validate_suggested_steps(sub_results[0])
+        return _validate_suggested_steps(reduced)
+
+    raise ValueError(
+        f"Text too long for context: {final_check['used_text']} tokens needed, "
+        f"{final_check['available']} available (model={effective_model})"
+    )
 
 
 def _validate_suggested_steps(raw: str) -> dict:

@@ -21,8 +21,16 @@
 		duration: number;
 		language: string;
 		share_id: string | null;
+		share_expires_at: string | null;
+		share_revoked_at: string | null;
 		created_at: string;
 		updated_at: string;
+	}
+
+	interface ShareState {
+		share_id: string;
+		share_expires_at: string | null;
+		share_revoked_at: string | null;
 	}
 
 	let transcriptions: TranscriptionListItem[] = $state([]);
@@ -38,6 +46,10 @@
 	let deleting = $state(false);
 	let sharing = $state(false);
 	let analyzing = $state(false);
+	let expiryChoice = $state('never');
+	let customExpiry = $state('');
+	let expirySaving = $state(false);
+	let revoking = $state(false);
 	let toast = $state('');
 	let copySuccess = $state(false);
 	let copyAnalysisSuccess = $state(false);
@@ -155,7 +167,9 @@
 			if (selectedDetail.share_id) {
 				await fetchApi('DELETE', `/api/saved-transcriptions/${selectedDetail.id}/share`);
 				selectedDetail.share_id = null;
-				showToast('Доступ отменён');
+				selectedDetail.share_expires_at = null;
+				selectedDetail.share_revoked_at = null;
+				showToast('Ссылка удалена');
 			} else {
 				const data = await fetchApi<{ share_id: string }>('POST', `/api/saved-transcriptions/${selectedDetail.id}/share`);
 				selectedDetail.share_id = data.share_id;
@@ -167,6 +181,81 @@
 			console.error('Failed to toggle share:', e);
 		} finally {
 			sharing = false;
+		}
+	}
+
+	function formatShareExpiry(dateStr: string | null): string {
+		if (!dateStr) return 'бессрочно';
+		const d = new Date(dateStr);
+		const pad = (n: number) => String(n).padStart(2, '0');
+		return `до ${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+	}
+
+	function shareIsActive(detail: TranscriptionDetail): boolean {
+		if (!detail.share_id || detail.share_revoked_at) return false;
+		if (!detail.share_expires_at) return true;
+		return new Date(detail.share_expires_at).getTime() > Date.now();
+	}
+
+	async function applyShareExpiry() {
+		if (!selectedDetail || expirySaving) return;
+		expirySaving = true;
+		try {
+			let body: Record<string, unknown> = {};
+			if (expiryChoice === '7d') body = { duration_seconds: 7 * 24 * 3600 };
+			else if (expiryChoice === '30d') body = { duration_seconds: 30 * 24 * 3600 };
+			else if (expiryChoice === 'custom') {
+				if (!customExpiry) return;
+				body = { expires_at: new Date(customExpiry).toISOString() };
+			}
+			const data = await fetchApi<ShareState>(
+				'PUT',
+				`/api/saved-transcriptions/${selectedDetail.id}/share/expiry`,
+				{ headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+			);
+			selectedDetail.share_expires_at = data.share_expires_at;
+			showToast(expiryChoice === 'never' ? 'Срок действия снят' : 'Срок ссылки обновлён');
+		} catch (e) {
+			console.error('Failed to set share expiry:', e);
+			showToast('Не удалось обновить срок');
+		} finally {
+			expirySaving = false;
+		}
+	}
+
+	async function softRevokeShare() {
+		if (!selectedDetail || revoking) return;
+		revoking = true;
+		try {
+			const data = await fetchApi<ShareState>(
+				'POST',
+				`/api/saved-transcriptions/${selectedDetail.id}/share/revoke`
+			);
+			selectedDetail.share_revoked_at = data.share_revoked_at;
+			showToast('Ссылка отозвана');
+		} catch (e) {
+			console.error('Failed to revoke share:', e);
+			showToast('Не удалось отозвать');
+		} finally {
+			revoking = false;
+		}
+	}
+
+	async function restoreShare() {
+		if (!selectedDetail || revoking) return;
+		revoking = true;
+		try {
+			const data = await fetchApi<ShareState>(
+				'POST',
+				`/api/saved-transcriptions/${selectedDetail.id}/share/unrevoke`
+			);
+			selectedDetail.share_revoked_at = data.share_revoked_at;
+			showToast('Ссылка восстановлена');
+		} catch (e) {
+			console.error('Failed to restore share:', e);
+			showToast('Не удалось восстановить');
+		} finally {
+			revoking = false;
 		}
 	}
 
@@ -376,27 +465,60 @@
 						{analyzing ? 'Анализирую...' : '🧠 Анализировать'}
 					</button>
 
-					{#if selectedDetail.share_id}
-						<div class="share-info">
-							<input
-								type="text"
-								class="input"
-								value="{`${window.location.origin}/share/${selectedDetail.share_id}`}"
-								readonly
-								style="flex:1; font-size: 0.85rem;"
-							/>
-							<button
-								class="btn"
-								onclick={async () => {
-									await navigator.clipboard.writeText(`${window.location.origin}/share/${selectedDetail.share_id}`);
-									showToast('Ссылка скопирована!');
-								}}
-							>
-								📋
+				{#if selectedDetail.share_id}
+					<div class="share-info">
+						<input
+							type="text"
+							class="input"
+							value="{`${window.location.origin}/share/${selectedDetail.share_id}`}"
+							readonly
+							style="flex:1; font-size: 0.85rem;"
+						/>
+						<button
+							class="btn"
+							onclick={async () => {
+								await navigator.clipboard.writeText(`${window.location.origin}/share/${selectedDetail.share_id}`);
+								showToast('Ссылка скопирована!');
+							}}
+						>
+							📋
+						</button>
+						<button class="btn" onclick={toggleShare} disabled={sharing}>Удалить ссылку</button>
+					</div>
+					<div class="share-lifecycle">
+						{#if selectedDetail.share_revoked_at}
+							<span class="share-status share-status-revoked">Ссылка отозвана — недоступна для открытия</span>
+							<button class="btn" onclick={restoreShare} disabled={revoking}>
+								{revoking ? '...' : '↩ Восстановить'}
 							</button>
-							<button class="btn" onclick={toggleShare} disabled={sharing}>Отменить доступ</button>
-						</div>
-					{:else}
+						{:else if !shareIsActive(selectedDetail)}
+							<span class="share-status share-status-revoked">Срок ссылки истёк</span>
+						{:else}
+							<span class="share-status">Ссылка действует ({formatShareExpiry(selectedDetail.share_expires_at)})</span>
+							<button class="btn" onclick={softRevokeShare} disabled={revoking}>
+								{revoking ? '...' : '⏸ Отозвать'}
+							</button>
+						{/if}
+
+						<label class="expiry-label" for="expiry-select">Срок действия:</label>
+						<select id="expiry-select" class="input expiry-select" bind:value={expiryChoice}>
+							<option value="never">Бессрочно</option>
+							<option value="7d">7 дней</option>
+							<option value="30d">30 дней</option>
+							<option value="custom">Своя дата</option>
+						</select>
+						{#if expiryChoice === 'custom'}
+							<input type="datetime-local" class="input expiry-custom" bind:value={customExpiry} />
+						{/if}
+						<button
+							class="btn"
+							onclick={applyShareExpiry}
+							disabled={expirySaving || (expiryChoice === 'custom' && !customExpiry)}
+						>
+							{expirySaving ? '...' : 'Применить'}
+						</button>
+					</div>
+				{:else}
 						<button class="btn" onclick={toggleShare} disabled={sharing}>
 							{sharing ? '...' : '🔗 Поделиться'}
 						</button>
@@ -680,6 +802,39 @@
 		gap: 0.5rem;
 		align-items: center;
 		flex: 1 1 100%;
+	}
+
+	.share-lifecycle {
+		display: flex;
+		gap: 0.5rem;
+		align-items: center;
+		flex-wrap: wrap;
+		flex: 1 1 100%;
+		font-size: 0.8125rem;
+	}
+
+	.share-status {
+		color: var(--color-muted);
+	}
+
+	.share-status-revoked {
+		color: #dc3545;
+	}
+
+	.expiry-label {
+		color: var(--color-muted);
+	}
+
+	.expiry-select {
+		width: auto;
+		font-size: 0.8125rem;
+		padding: 0.25rem 0.5rem;
+	}
+
+	.expiry-custom {
+		width: auto;
+		font-size: 0.8125rem;
+		padding: 0.25rem 0.5rem;
 	}
 
 	.btn-danger {

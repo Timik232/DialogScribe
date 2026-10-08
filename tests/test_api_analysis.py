@@ -33,11 +33,11 @@ def _mock_llm(api_key="test-key", model="default-model", base_url="http://test")
 class TestSummary:
     def test_successful_summary(self, client):
         mock_llm = _mock_llm()
+        markdown = "# Summary\n\n- Key point\n\n<script>alert(1)</script>"
 
         with (
             patch("routers.analysis.llm_client", mock_llm),
-            patch("routers.analysis.generate_summary", new=AsyncMock(return_value="# Summary\n\nKey points.")),
-            patch("routers.analysis.summary_to_html", return_value="<h1>Summary</h1>"),
+            patch("routers.analysis.generate_summary", new=AsyncMock(return_value=markdown)),
         ):
             resp = client.post(
                 "/api/summary",
@@ -46,8 +46,8 @@ class TestSummary:
 
         assert resp.status_code == 200
         data = resp.json()
-        assert data["summary_markdown"] == "# Summary\n\nKey points."
-        assert data["summary_html"] == "<h1>Summary</h1>"
+        assert data == {"summary_markdown": markdown}
+        assert not any(key.endswith("_html") for key in data)
 
     def test_summary_with_custom_model(self, client):
         mock_llm = _mock_llm()
@@ -55,7 +55,6 @@ class TestSummary:
         with (
             patch("routers.analysis.llm_client", mock_llm),
             patch("routers.analysis.generate_summary", new=AsyncMock(return_value="Result")),
-            patch("routers.analysis.summary_to_html", return_value="<p>Result</p>"),
         ):
             resp = client.post(
                 "/api/summary",
@@ -63,7 +62,8 @@ class TestSummary:
             )
 
         assert resp.status_code == 200
-        mock_llm.update_config.assert_called_once()
+        assert resp.json() == {"summary_markdown": "Result"}
+        mock_llm.update_config.assert_not_called()
 
     def test_llm_not_configured(self, client):
         mock_llm = _mock_llm(api_key="")
@@ -128,7 +128,6 @@ class TestMindmap:
         with (
             patch("routers.analysis.llm_client", mock_llm),
             patch("routers.analysis.generate_mindmap_markdown", return_value="# Root\n## Branch"),
-            patch("routers.analysis.render_mindmap_html", return_value='<iframe src="/mindmap/test" width="100%" height="500"></iframe>'),
         ):
             resp = client.post(
                 "/api/mindmap",
@@ -137,11 +136,8 @@ class TestMindmap:
 
         assert resp.status_code == 200
         data = resp.json()
-        assert data["mindmap_markdown"] == "# Root\n## Branch"
-        assert "mindmap_uid" in data
-        assert len(data["mindmap_uid"]) == 12
-        assert "mindmap_html" in data
-        assert "<iframe" in data["mindmap_html"]
+        assert data == {"mindmap_markdown": "# Root\n## Branch"}
+        assert not any(key.endswith("_html") for key in data)
 
     def test_mindmap_llm_not_configured(self, client):
         mock_llm = _mock_llm(api_key="")
@@ -337,6 +333,7 @@ class TestChat:
 
         with (
             patch("routers.analysis.llm_client", mock_llm),
+            patch("routers.analysis.get_available_models", return_value=["gpt-4", "glm-5-turbo"]),
             patch("routers.analysis.chat_with_transcript", return_value={"answer": "Ответ"}),
         ):
             resp = client.post(
@@ -349,7 +346,7 @@ class TestChat:
             )
 
         assert resp.status_code == 200
-        mock_llm.update_config.assert_called_once()
+        mock_llm.update_config.assert_not_called()
 
     def test_chat_llm_not_configured(self, client):
         mock_llm = _mock_llm(api_key="")

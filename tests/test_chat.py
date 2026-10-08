@@ -112,7 +112,9 @@ class TestChatWithTranscript:
             llm_client=mock_client,
         )
 
-        mock_client.update_config.assert_called_once()
+        mock_client.update_config.assert_not_called()
+        create_call = mock_client._get_client.return_value.chat.completions.create.call_args
+        assert create_call.kwargs["model"] == "model-b"
 
     def test_chat_with_history(self):
         mock_client = MagicMock()
@@ -173,3 +175,122 @@ class TestChatWithTranscript:
             )
 
         assert result["answer"] == "Answer"
+
+
+# ---------------------------------------------------------------------------
+# Bounded chunk-summary cache (Task 14): size cap, TTL, isolation
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _clean_chunk_summary_cache():
+    from gigaam_transcriber.chat import reset_chunk_summary_cache
+
+    reset_chunk_summary_cache()
+    yield
+    reset_chunk_summary_cache()
+
+
+class TestBoundedChunkSummaryCache:
+    def _cache_helpers(self):
+        from gigaam_transcriber import chat as chat_module
+        from gigaam_transcriber.chat import _cache_get, _cache_put
+
+        return chat_module, _cache_get, _cache_put
+
+    def test_cache_size_bound_fifo_eviction(self, monkeypatch):
+        chat_module, _cache_get, _cache_put = self._cache_helpers()
+        monkeypatch.setenv("CHAT_CACHE_MAX_ENTRIES", "3")
+        for i in range(5):
+            _cache_put(f"key-{i}", [{"index": i}])
+
+        assert len(chat_module._chunk_summary_cache) == 3
+        assert _cache_get("key-0") is None
+        assert _cache_get("key-1") is None
+        assert _cache_get("key-2") == [{"index": 2}]
+        assert _cache_get("key-3") == [{"index": 3}]
+        assert _cache_get("key-4") == [{"index": 4}]
+
+    def test_cache_ttl_expiry(self, monkeypatch):
+        import time
+
+        chat_module, _cache_get, _cache_put = self._cache_helpers()
+        monkeypatch.setenv("CHAT_CACHE_TTL_SECONDS", "0.05")
+        _cache_put("key", [{"index": 0}])
+        assert _cache_get("key") == [{"index": 0}]
+        time.sleep(0.1)
+        assert _cache_get("key") is None
+        assert "key" not in chat_module._chunk_summary_cache
+
+    def test_cache_reinsert_refreshes_fifo_order(self, monkeypatch):
+        _, _cache_get, _cache_put = self._cache_helpers()
+        monkeypatch.setenv("CHAT_CACHE_MAX_ENTRIES", "2")
+        _cache_put("a", [{"index": 0}])
+        _cache_put("b", [{"index": 1}])
+        _cache_get("a")
+        _cache_put("a", [{"index": 0}])  # re-touched → moved to the back
+        _cache_put("c", [{"index": 2}])  # evicts "b", not "a"
+        assert _cache_get("a") == [{"index": 0}]
+        assert _cache_get("b") is None
+        assert _cache_get("c") == [{"index": 2}]
+
+    def test_compression_cache_hit_and_ttl_miss_via_chat_flow(self, monkeypatch):
+        import time
+
+        from gigaam_transcriber.chat import _get_compressed_transcript
+
+        monkeypatch.setenv("CHAT_CACHE_TTL_SECONDS", "0.1")
+        llm = MagicMock()
+        llm.call.return_value = "Часть: суть фрагмента"
+        text = "Спикер 1: короткий текст транскрипции."
+        budget = {"total": 128000}
+
+        first = _get_compressed_transcript(text, None, llm, budget)
+        assert llm.call.call_count == 1
+        second = _get_compressed_transcript(text, None, llm, budget)
+        assert llm.call.call_count == 1, "cache hit must not re-summarize"
+        assert first == second
+
+        time.sleep(0.15)
+        _get_compressed_transcript(text, None, llm, budget)
+        assert llm.call.call_count == 2, "expired entry must trigger re-summarization"
+
+    def test_no_cross_text_data_leakage(self):
+        from gigaam_transcriber.chat import _get_compressed_transcript
+
+        llm = MagicMock()
+        llm.call.side_effect = ["сводка A", "сводка B"]
+        text_a = "Транскрипт пользователя A: продажи."
+        text_b = "Транскрипт пользователя B: поддержка."
+
+        ctx_a = _get_compressed_transcript(text_a, None, llm, {"total": 128000})
+        ctx_b = _get_compressed_transcript(text_b, None, llm, {"total": 128000})
+
+        assert "сводка A" in ctx_a and "сводка B" not in ctx_a
+        assert "сводка B" in ctx_b and "сводка A" not in ctx_b
+        assert llm.call.call_count == 2
+
+    def test_concurrent_cache_access_thread_safe(self, monkeypatch):
+        import threading
+
+        chat_module, _cache_get, _cache_put = self._cache_helpers()
+        monkeypatch.setenv("CHAT_CACHE_MAX_ENTRIES", "8")
+        errors: list[Exception] = []
+
+        def worker(idx: int) -> None:
+            try:
+                for i in range(50):
+                    key = f"k-{idx}-{i % 12}"
+                    _cache_put(key, [{"index": i}])
+                    _cache_get(key)
+            except Exception as exc:  # pragma: no cover - failure path
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, errors
+        assert len(chat_module._chunk_summary_cache) <= 8

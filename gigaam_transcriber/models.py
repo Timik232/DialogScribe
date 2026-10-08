@@ -1,9 +1,10 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, Column, DateTime, Float, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from gigaam_transcriber.asr_provider import DEFAULT_ASR_PROVIDER
 from gigaam_transcriber.database import Base
 
 
@@ -33,6 +34,31 @@ class User(Base):
 
     limits = relationship("UserLimit", back_populates="user", lazy="selectin")
     approver = relationship("User", remote_side=lambda: [User.id], foreign_keys=[approved_by])
+
+
+class RefreshSession(Base):
+    """Server-side state for one issued refresh token (Task 7).
+
+    Keyed by the SHA-256 hex of the JWT ``jti`` claim — raw refresh tokens
+    are never persisted. A row is "live" while ``revoked_at`` is NULL and
+    ``expires_at`` is in the future; ``rotated_to_hashed_jti`` links a
+    rotated token to its successor so a replayed (already-used) token can
+    revoke the whole descendant chain.
+    """
+
+    __tablename__ = "refresh_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    hashed_jti: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    rotated_to_hashed_jti: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
+    user_agent: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
+    ip: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
+
+    user = relationship("User", backref="refresh_sessions")
 
 
 class Template(Base):
@@ -89,36 +115,37 @@ class SavedTranscription(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     full_text: Mapped[str] = mapped_column(Text, nullable=False)
     analysis_text: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
-    segments_json: Mapped[dict] = mapped_column("segments_json", JSON, nullable=True, default=dict)
+    segments_json: Mapped[list] = mapped_column("segments_json", JSON, nullable=True, default=list)
     speaker_names: Mapped[dict] = mapped_column("speaker_names", JSON, nullable=True, default=dict)
     duration: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     language: Mapped[str] = mapped_column(String(10), nullable=False, default="ru")
     share_id: Mapped[str | None] = mapped_column(String(36), nullable=True, unique=True, default=None, index=True)
+    # Nullable share lifecycle state: NULL share_expires_at = never expires,
+    # NULL share_revoked_at = not revoked. Existing rows keep working because
+    # both columns default to NULL (additive migration 009_share_lifecycle).
+    share_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    share_revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow, onupdate=_utcnow)
 
     user = relationship("User", backref="saved_transcriptions")
 
 
-class MeetingPrepPlan(Base):
-    __tablename__ = "meeting_prep_plans"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    company_data: Mapped[str] = mapped_column(Text, nullable=False)
-    catalog_data: Mapped[str] = mapped_column(Text, nullable=False)
-    result_markdown: Mapped[str] = mapped_column(Text, nullable=False)
-    model_used: Mapped[str] = mapped_column(String(100), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
-
-    user = relationship("User", backref="meeting_prep_plans")
-
+# NOTE: the meeting_prep_plans table (migration 007) has no ORM mapping —
+# meeting-prep results are computed per request and never persisted.
 
 class UserSettings(Base):
     __tablename__ = "user_settings"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    user_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False, index=True)
-    asr_provider: Mapped[str] = mapped_column(String(100), nullable=False, default="litellm")
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False, index=True
+    )
+    asr_provider: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        default=DEFAULT_ASR_PROVIDER.value,
+        server_default=DEFAULT_ASR_PROVIDER.value,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow, onupdate=_utcnow)

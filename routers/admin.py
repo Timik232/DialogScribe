@@ -8,7 +8,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from gigaam_transcriber.auth import get_admin_user
 from gigaam_transcriber.database import get_db
 from gigaam_transcriber.models import UsageEvent, User, UserLimit
-from gigaam_transcriber.usage import get_global_stats, get_usage_timeseries
+from gigaam_transcriber.sessions import revoke_all_user_sessions
+from gigaam_transcriber.usage import (
+    get_global_stats,
+    get_usage_timeseries,
+    prune_usage_events,
+)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -30,6 +35,21 @@ async def stats_overview(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     return await get_global_stats(db)
+
+
+@router.delete("/usage-events")
+async def delete_usage_events(
+    admin: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+    older_than_days: int = Query(180, ge=1, le=3650),
+) -> dict:
+    """Delete usage events older than the given retention window.
+
+    Idempotent retention cleanup; safe to call repeatedly (subsequent calls
+    report 0 deleted). Only usage_events rows are removed.
+    """
+    deleted = await prune_usage_events(db, older_than_days=older_than_days)
+    return {"deleted": deleted, "older_than_days": older_than_days}
 
 
 @router.get("/stats/timeseries")
@@ -185,6 +205,8 @@ async def patch_user(
 
     if body.is_active is not None:
         user.is_active = body.is_active
+        if body.is_active is False:
+            await revoke_all_user_sessions(db, user.id)
 
     await db.flush()
     return {"id": user.id, "email": user.email, "is_active": user.is_active}

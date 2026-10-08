@@ -6,29 +6,37 @@ LLM-суммаризация транскрипций с поддержкой ш
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
+import threading
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
-import markdown as md_lib
 from openai import OpenAI, APIError, APIConnectionError, RateLimitError, AuthenticationError
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-from gigaam_transcriber.context_utils import estimate_tokens, get_model_context_limit
+from gigaam_transcriber.context_utils import (
+    estimate_tokens,
+    estimate_tokens_accurate,
+    get_context_budget,
+    get_model_context_limit,
+    split_into_chunks,
+)
 from gigaam_transcriber.template_manager import TemplateManager
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("gigaam_transcriber.llm")
 
 # ---------------------------------------------------------------------------
 # Конфигурация по умолчанию
 # ---------------------------------------------------------------------------
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
-DEFAULT_MODEL = "gpt-4.1"
+DEFAULT_MODEL = "glm-5-turbo"
 MAX_CHUNK_TOKENS = 3000
 CHUNK_OVERLAP_SENTENCES = 2
 
@@ -204,6 +212,7 @@ class LLMClientConfig:
     base_url: str = field(default_factory=_default_base_url)
     api_key: str = field(default_factory=_default_api_key)
     model: str = field(default_factory=_default_model)
+    max_retries: int = 3
 
 
 class LLMClient:
@@ -211,41 +220,63 @@ class LLMClient:
 
     def __init__(self, config: Optional[LLMClientConfig] = None):
         self._config = config or LLMClientConfig()
+        self._max_retries = self._config.max_retries
         self._client: Optional[OpenAI] = None
+        # Serializes lazy client initialization and config updates across
+        # worker threads (async endpoints offload blocking LLM calls via
+        # asyncio.to_thread, so multiple threads share one client).
+        self._lock = threading.Lock()
 
     @property
     def config(self) -> LLMClientConfig:
         return self._config
 
     def _get_client(self) -> OpenAI:
-        """Ленивая инициализация OpenAI-клиента."""
+        """Ленивая инициализация OpenAI-клиента (thread-safe)."""
         if self._client is None:
-            if not self._config.api_key:
-                raise ValueError(
-                    "LLM API key не задан в окружении. "
-                    "Укажите LLM_API_KEY (или OPENAI_API_KEY) через Vault/.env."
-                )
-            self._client = OpenAI(
-                base_url=self._config.base_url,
-                api_key=self._config.api_key,
-            )
+            with self._lock:
+                if self._client is None:
+                    if not self._config.api_key:
+                        raise ValueError(
+                            "LLM API key не задан в окружении. "
+                            "Укажите LLM_API_KEY (или OPENAI_API_KEY) через Vault/.env."
+                        )
+                    self._client = OpenAI(
+                        base_url=self._config.base_url,
+                        api_key=self._config.api_key,
+                    )
         return self._client
 
     def update_config(self, base_url: str, api_key: str, model: str) -> None:
-        """Обновить конфигурацию и пересоздать клиент."""
-        self._config.base_url = base_url or DEFAULT_BASE_URL
-        self._config.api_key = api_key
-        self._config.model = model or DEFAULT_MODEL
-        self._client = None
+        """Обновить конфигурацию и пересоздать клиент.
 
-    def call(self, system_prompt: str, user_text: str, max_tokens: int = 4096) -> str:
+        Thread-safe: guarded by the same lock as lazy initialization, so a
+        concurrent ``_get_client()`` can never observe a half-built client
+        and config mutation cannot interleave with client construction.
+        In-flight calls keep their already-captured client/model references.
+        Use ``call(model_override=...)`` for per-request model selection.
         """
-        Вызов LLM API с обработкой ошибок.
+        with self._lock:
+            self._config.base_url = base_url or DEFAULT_BASE_URL
+            self._config.api_key = api_key
+            self._config.model = model or DEFAULT_MODEL
+            self._client = None
+
+    def call(
+        self,
+        system_prompt: str,
+        user_text: str,
+        max_tokens: int = 4096,
+        model_override: Optional[str] = None,
+    ) -> str:
+        """
+        Вызов LLM API с обработкой ошибок и retry.
 
         Args:
             system_prompt: Системный промпт
             user_text: Текст пользователя (транскрипция)
             max_tokens: Максимум токенов в ответе
+            model_override: Per-call model override (thread-safe, no mutation).
 
         Returns:
             Текстовый ответ от LLM
@@ -255,28 +286,106 @@ class LLMClient:
             ConnectionError: Ошибка подключения
             RuntimeError: Ошибка API
         """
+        effective_model = model_override or self._config.model
         client = self._get_client()
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text},
+        ]
 
-        try:
-            response = client.chat.completions.create(
-                model=self._config.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_text},
-                ],
-                max_tokens=max_tokens,
-                temperature=0.3,
-            )
-            return response.choices[0].message.content or ""
+        logger.info(
+            "LLM call starting | model=%s | estimated_input_tokens=%d | messages=%d",
+            effective_model,
+            estimate_tokens_accurate(system_prompt + user_text, effective_model),
+            len(messages),
+        )
 
-        except AuthenticationError as e:
-            raise ValueError(f"Ошибка авторизации: {e}") from e
-        except RateLimitError as e:
-            raise RuntimeError(f"Превышен лимит запросов: {e}") from e
-        except APIConnectionError as e:
-            raise ConnectionError(f"Не удалось подключиться к {self._config.base_url}: {e}") from e
-        except APIError as e:
-            raise RuntimeError(f"Ошибка API: {e}") from e
+        last_exc: Exception | None = None
+        for attempt in range(self._max_retries + 1):
+            t0 = time.time()
+            try:
+                response = client.chat.completions.create(
+                    model=effective_model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=0.3,
+                )
+                latency_ms = (time.time() - t0) * 1000
+                logger.info(
+                    "LLM call completed | model=%s | input_tokens=%d | output_tokens=%d | latency_ms=%.0f | status=success",
+                    effective_model,
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens,
+                    latency_ms,
+                )
+                return response.choices[0].message.content or ""
+
+            except AuthenticationError as e:
+                latency_ms = (time.time() - t0) * 1000
+                logger.error(
+                    "LLM call failed | model=%s | error_type=%s | latency_ms=%.0f | status=error",
+                    effective_model,
+                    type(e).__name__,
+                    latency_ms,
+                )
+                raise ValueError(f"Ошибка авторизации: {e}") from e
+
+            except (RateLimitError, APIConnectionError) as e:
+                last_exc = e
+                if attempt < self._max_retries:
+                    backoff = float(2 ** attempt)
+                    logger.warning(
+                        "LLM call retry | model=%s | attempt=%d/%d | error_type=%s | backoff=%.1fs",
+                        effective_model,
+                        attempt + 1,
+                        self._max_retries,
+                        type(e).__name__,
+                        backoff,
+                    )
+                    time.sleep(backoff)
+                    continue
+                latency_ms = (time.time() - t0) * 1000
+                logger.error(
+                    "LLM call failed | model=%s | error_type=%s | latency_ms=%.0f | status=error",
+                    effective_model,
+                    type(e).__name__,
+                    latency_ms,
+                )
+
+            except APIError as e:
+                status = getattr(e, "status_code", None)
+                if status is not None and status >= 500 and attempt < self._max_retries:
+                    last_exc = e
+                    backoff = float(2 ** attempt)
+                    logger.warning(
+                        "LLM call retry | model=%s | attempt=%d/%d | error_type=%s | backoff=%.1fs",
+                        effective_model,
+                        attempt + 1,
+                        self._max_retries,
+                        type(e).__name__,
+                        backoff,
+                    )
+                    time.sleep(backoff)
+                    continue
+                latency_ms = (time.time() - t0) * 1000
+                logger.error(
+                    "LLM call failed | model=%s | error_type=%s | latency_ms=%.0f | status=error",
+                    effective_model,
+                    type(e).__name__,
+                    latency_ms,
+                )
+                if status is not None and status >= 500:
+                    last_exc = e
+                    continue
+                raise RuntimeError(f"Ошибка API: {e}") from e
+
+        if last_exc is None:
+            raise RuntimeError("LLM call failed unexpectedly")
+        if isinstance(last_exc, RateLimitError):
+            raise RuntimeError(f"Превышен лимит запросов: {last_exc}") from last_exc
+        if isinstance(last_exc, APIConnectionError):
+            raise ConnectionError(f"Не удалось подключиться к {self._config.base_url}: {last_exc}") from last_exc
+        raise RuntimeError(f"Ошибка API: {last_exc}") from last_exc
 
     def test_connection(self) -> tuple[bool, str]:
         """
@@ -316,43 +425,113 @@ class LLMClient:
 def split_text(
     text: str, max_tokens: int = MAX_CHUNK_TOKENS, overlap_sentences: int = CHUNK_OVERLAP_SENTENCES
 ) -> list[str]:
-    if estimate_tokens(text) <= max_tokens:
-        return [text]
-
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-    if len(sentences) <= 1:
-        sentences = text.split("\n")
-    if len(sentences) <= 1:
-        words = text.split()
-        chunk_size = max_tokens * 2
-        chunks = []
-        for i in range(0, len(words), chunk_size):
-            chunks.append(" ".join(words[i : i + chunk_size]))
-        return chunks if chunks else [text]
-
-    chunks: list[str] = []
-    current_chunk: list[str] = []
-    current_tokens = 0
-
-    for sentence in sentences:
-        sent_tokens = estimate_tokens(sentence)
-        if current_tokens + sent_tokens > max_tokens and current_chunk:
-            chunks.append(" ".join(current_chunk))
-            current_chunk = current_chunk[-overlap_sentences:] if overlap_sentences > 0 else []
-            current_tokens = sum(estimate_tokens(s) for s in current_chunk)
-
-        current_chunk.append(sentence)
-        current_tokens += sent_tokens
-
-    if current_chunk:
-        chunks.append(" ".join(current_chunk))
-
-    return chunks
+    """Разбить текст на чанки. Делегирует к context_utils.split_into_chunks()."""
+    return split_into_chunks(text, max_tokens, overlap_sentences)
 
 
 # ---------------------------------------------------------------------------
 # Генерация саммари
 # ---------------------------------------------------------------------------
+
+
+def _hierarchical_reduce(
+    chunk_summaries: list[str],
+    reduce_prompt: str,
+    llm_client: LLMClient,
+    max_depth: int = 2,
+    model: Optional[str] = None,
+) -> str:
+    """Reduce chunk summaries with budget-aware hierarchical splitting.
+
+    If combined summaries fit within the model's context budget, does a single
+    reduce call. Otherwise splits summaries into sub-groups, reduces each
+    sub-group, then reduces the intermediate results (up to max_depth=2).
+    """
+    effective_model = model or llm_client.config.model
+    combined = "\n\n---\n\n".join(chunk_summaries)
+    budget = get_context_budget(effective_model, reduce_prompt, combined)
+
+    if budget["available"] >= estimate_tokens_accurate(combined, effective_model):
+        logger.info(
+            "Reduce: %d chunks, %d tokens, strategy=simple",
+            len(chunk_summaries),
+            budget["used_text"],
+        )
+        return llm_client.call(reduce_prompt, combined, model_override=model)
+
+    if max_depth <= 0:
+        raise ValueError(
+            f"Text too long for context: {budget['used_text']} tokens needed, "
+            f"{budget['available']} available (model={effective_model}, limit={budget['total']})"
+        )
+
+    logger.info(
+        "Reduce: %d chunks, %d tokens, strategy=hierarchical (depth=%d)",
+        len(chunk_summaries),
+        budget["used_text"],
+        max_depth,
+    )
+
+    prompt_tokens = estimate_tokens_accurate(reduce_prompt, effective_model)
+    available_per_group = budget["total"] - prompt_tokens - budget["output_reserve"]
+
+    summaries_per_group = 1
+    for size in range(len(chunk_summaries), 0, -1):
+        test_combined = "\n\n---\n\n".join(chunk_summaries[:size])
+        if estimate_tokens_accurate(test_combined, effective_model) <= available_per_group:
+            summaries_per_group = size
+            break
+
+    sub_results: list[str] = []
+    for i in range(0, len(chunk_summaries), summaries_per_group):
+        group = chunk_summaries[i : i + summaries_per_group]
+        group_combined = "\n\n---\n\n".join(group)
+        sub_result = llm_client.call(reduce_prompt, group_combined, model_override=model)
+        sub_results.append(sub_result)
+
+    return _hierarchical_reduce(sub_results, reduce_prompt, llm_client, max_depth - 1, model=model)
+
+
+def _generate_summary_compute(
+    transcription_text: str,
+    system_prompt: str,
+    llm_client: LLMClient,
+    model: str | None = None,
+) -> str:
+    """Synchronous summary compute: blocking LLM calls + retry sleeps.
+
+    Must only run inside a worker thread (callers offload it via
+    ``asyncio.to_thread``); never call directly from an event loop.
+    """
+    effective_model = model or llm_client.config.model
+    chunks = split_into_chunks(
+        transcription_text, MAX_CHUNK_TOKENS, CHUNK_OVERLAP_SENTENCES, model=effective_model
+    )
+
+    if len(chunks) == 1:
+        return llm_client.call(system_prompt, chunks[0], model_override=model)
+
+    # Map-reduce для длинных транскрипций
+    logger.info("Map-reduce: %d chunks", len(chunks))
+
+    chunk_summaries: list[str] = []
+    for i, chunk in enumerate(chunks):
+        logger.debug("Summarizing chunk %d/%d", i + 1, len(chunks))
+        chunk_prompt = (
+            f"{system_prompt}\n\n"
+            f"⚠️ Это часть {i + 1} из {len(chunks)} полной транскрипции. "
+            f"Суммаризируй эту часть, сохранив все ключевые факты."
+        )
+        summary = llm_client.call(chunk_prompt, chunk, model_override=model)
+        chunk_summaries.append(summary)
+
+    reduce_prompt = (
+        "Ты — редактор. Перед тобой частичные саммари одной транскрипции, "
+        "разбитой на части. Объедини их в единое целостное саммари, "
+        "убрав дубли и сохранив структуру.\n\n"
+        f"Используй формат:\n{system_prompt}"
+    )
+    return _hierarchical_reduce(chunk_summaries, reduce_prompt, llm_client, model=model)
 
 
 async def generate_summary(
@@ -361,9 +540,14 @@ async def generate_summary(
     llm_client: LLMClient,
     db: Optional["AsyncSession"] = None,
     user_id: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> str:
     """
     Сгенерировать саммари транскрипции.
+
+    Template resolution (ORM access) happens on the event loop; the blocking
+    LLM compute is offloaded to a worker thread via ``asyncio.to_thread`` so
+    the loop stays responsive.
 
     Args:
         transcription_text: Полный текст транскрипции
@@ -371,6 +555,7 @@ async def generate_summary(
         llm_client: Настроенный LLM-клиент
         db: AsyncSession для доступа к БД шаблонов
         user_id: ID пользователя для загрузки кастомных шаблонов
+        model: Per-request model override (thread-safe)
 
     Returns:
         Markdown-строка с саммари
@@ -385,40 +570,10 @@ async def generate_summary(
             f"Неизвестный шаблон: {template_key}. Доступные: {list(all_templates.keys())}"
         )
 
-    system_prompt = template["system_prompt"]
-    chunks = split_text(transcription_text)
-
-    if len(chunks) == 1:
-        return llm_client.call(system_prompt, chunks[0])
-
-    # Map-reduce для длинных транскрипций
-    logger.info("Map-reduce: %d chunks", len(chunks))
-
-    chunk_summaries: list[str] = []
-    for i, chunk in enumerate(chunks):
-        logger.debug("Summarizing chunk %d/%d", i + 1, len(chunks))
-        chunk_prompt = (
-            f"{system_prompt}\n\n"
-            f"⚠️ Это часть {i + 1} из {len(chunks)} полной транскрипции. "
-            f"Суммаризируй эту часть, сохранив все ключевые факты."
-        )
-        summary = llm_client.call(chunk_prompt, chunk)
-        chunk_summaries.append(summary)
-
-    combined = "\n\n---\n\n".join(chunk_summaries)
-    reduce_prompt = (
-        "Ты — редактор. Перед тобой частичные саммари одной транскрипции, "
-        "разбитой на части. Объедини их в единое целостное саммари, "
-        "убрав дубли и сохранив структуру.\n\n"
-        f"Используй формат:\n{system_prompt}"
-    )
-    final = llm_client.call(reduce_prompt, combined)
-    return final
-
-
-def summary_to_html(markdown_text: str) -> str:
-    """Конвертировать Markdown-саммари в HTML для Gradio."""
-    return md_lib.markdown(
-        markdown_text,
-        extensions=["tables", "fenced_code", "nl2br"],
+    return await asyncio.to_thread(
+        _generate_summary_compute,
+        transcription_text,
+        template["system_prompt"],
+        llm_client,
+        model,
     )

@@ -17,6 +17,16 @@ def client():
     ):
         from api import app
 
+        import asyncio
+
+        from gigaam_transcriber.database import Base, engine
+
+        async def _create_tables():
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+
+        asyncio.run(_create_tables())
+
         setup_auth_override(app)
         with TestClient(app) as c:
             yield c, mock_transcriber
@@ -102,7 +112,7 @@ class TestTranscribe:
     def test_file_too_large(self, client):
         c, _ = client
 
-        with patch("routers.transcription.MAX_UPLOAD_SIZE_MB", 0):
+        with patch("routers._uploads.max_upload_bytes", return_value=0):
             resp = c.post(
                 "/api/transcribe",
                 files=[("file", ("big.wav", io.BytesIO(b"x" * 1024), "audio/wav"))],

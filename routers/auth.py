@@ -1,15 +1,18 @@
 import hashlib
+import logging
 import os
 import re
 import secrets
+import uuid
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gigaam_transcriber.auth import (
+    REFRESH_TOKEN_EXPIRE_DAYS,
     create_access_token,
     create_refresh_token,
     decode_token,
@@ -20,10 +23,70 @@ from gigaam_transcriber.auth import (
 from gigaam_transcriber.database import get_db
 from gigaam_transcriber.email import send_password_reset_email
 from gigaam_transcriber.models import User
+from gigaam_transcriber.rate_limit import ip_rate_limit
+from gigaam_transcriber.sessions import (
+    create_refresh_session,
+    get_refresh_session,
+    hash_jti,
+    revoke_all_user_sessions,
+    revoke_refresh_chain,
+    rotate_refresh_session,
+)
+from gigaam_transcriber.settings import is_development
+
+logger = logging.getLogger(__name__)
 
 auth_router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
+
+REFRESH_COOKIE_MAX_AGE = REFRESH_TOKEN_EXPIRE_DAYS * 24 * 3600
+CSRF_COOKIE_NAME = "csrf_token"
+CSRF_HEADER_NAME = "x-csrf-token"
+
+
+def _client_ip(request: Request) -> str | None:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else None
+
+
+def _set_auth_cookies(response: Response, refresh_token: str, csrf_token: str) -> None:
+    # Secure is mandatory outside development; localhost http dev keeps it off.
+    secure = not is_development()
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=secure,
+        samesite="lax",
+        max_age=REFRESH_COOKIE_MAX_AGE,
+        path="/api/auth",
+    )
+    response.set_cookie(
+        key=CSRF_COOKIE_NAME,
+        value=csrf_token,
+        httponly=False,
+        secure=secure,
+        samesite="lax",
+        max_age=REFRESH_COOKIE_MAX_AGE,
+        path="/",
+    )
+
+
+def _clear_auth_cookies(response: Response) -> None:
+    response.delete_cookie(key="refresh_token", path="/api/auth")
+    response.delete_cookie(key=CSRF_COOKIE_NAME, path="/")
+
+
+def _validate_csrf(header_token: str | None, cookie_token: str | None) -> None:
+    if (
+        not header_token
+        or not cookie_token
+        or not secrets.compare_digest(header_token, cookie_token)
+    ):
+        raise HTTPException(status_code=403, detail="CSRF token missing or invalid")
 
 
 class RegisterRequest(BaseModel):
@@ -58,7 +121,7 @@ class ResetPasswordRequest(BaseModel):
     new_password: str = Field(min_length=8)
 
 
-@auth_router.post("/register", status_code=status.HTTP_201_CREATED)
+@auth_router.post("/register", status_code=status.HTTP_201_CREATED, dependencies=[Depends(ip_rate_limit("register"))])
 async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
     if not EMAIL_REGEX.match(body.email):
         raise HTTPException(status_code=422, detail="Invalid email format")
@@ -85,8 +148,13 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
     return {"user_id": user.id, "username": user.username, "email": user.email}
 
 
-@auth_router.post("/login", response_model=TokenResponse)
-async def login(body: LoginRequest, response: Response, db: AsyncSession = Depends(get_db)):
+@auth_router.post("/login", response_model=TokenResponse, dependencies=[Depends(ip_rate_limit("login"))])
+async def login(
+    body: LoginRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(
         select(User).where((User.email == body.login) | (User.username == body.login))
     )
@@ -107,32 +175,60 @@ async def login(body: LoginRequest, response: Response, db: AsyncSession = Depen
         )
 
     access_token = create_access_token(user.id, user.role)
-    refresh_token = create_refresh_token(user.id)
 
-    response.set_cookie(
-        key="refresh_token",
-        value=refresh_token,
-        httponly=True,
-        secure=False,
-        samesite="lax",
-        max_age=7 * 24 * 3600,
-        path="/api/auth",
+    jti = str(uuid.uuid4())
+    refresh_token = create_refresh_token(user.id, jti)
+    await create_refresh_session(
+        db,
+        user_id=user.id,
+        jti=jti,
+        user_agent=request.headers.get("user-agent"),
+        ip=_client_ip(request),
     )
+    # Commit before the cookie goes out: get_db's teardown commit races the
+    # response on real sockets, and a refresh arriving early would find no row.
+    await db.commit()
+
+    _set_auth_cookies(response, refresh_token, secrets.token_urlsafe(32))
 
     return TokenResponse(access_token=access_token)
 
 
-@auth_router.post("/refresh", response_model=TokenResponse)
+@auth_router.post("/refresh", response_model=TokenResponse, dependencies=[Depends(ip_rate_limit("refresh"))])
 async def refresh(
+    request: Request,
     response: Response,
     refresh_token: str = Cookie(None),
+    csrf_token: str = Cookie(None, alias=CSRF_COOKIE_NAME),
+    x_csrf_token: str = Header(None, alias=CSRF_HEADER_NAME),
     db: AsyncSession = Depends(get_db),
 ):
     if not refresh_token:
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
+    _validate_csrf(x_csrf_token, csrf_token)
+
     payload = decode_token(refresh_token)
     if payload.get("type") != "refresh":
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+    jti = payload.get("jti")
+    if not jti:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+    session = await get_refresh_session(db, hash_jti(jti))
+    if session is None:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+    if session.revoked_at is not None:
+        # Reuse of an already-consumed token: assume theft and kill the
+        # whole descendant chain before rejecting. get_db() rolls back on
+        # handler exceptions, so the chain-kill must be committed first.
+        await revoke_refresh_chain(db, session)
+        await db.commit()
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+    if session.expires_at <= datetime.utcnow():
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
     user_id = payload.get("sub")
@@ -144,23 +240,45 @@ async def refresh(
 
     access_token = create_access_token(user.id, user.role)
 
-    new_refresh = create_refresh_token(user.id)
-    response.set_cookie(
-        key="refresh_token",
-        value=new_refresh,
-        httponly=True,
-        secure=False,
-        samesite="lax",
-        max_age=7 * 24 * 3600,
-        path="/api/auth",
+    new_jti = str(uuid.uuid4())
+    new_refresh = create_refresh_token(user.id, new_jti)
+    await rotate_refresh_session(
+        db,
+        session,
+        new_jti,
+        user_agent=request.headers.get("user-agent"),
+        ip=_client_ip(request),
     )
+    # The successor row and the revocation must be durable before the new
+    # cookie is handed out, otherwise back-to-back requests can double-spend
+    # the old token (teardown commit races the response on real sockets).
+    await db.commit()
+    _set_auth_cookies(response, new_refresh, csrf_token or secrets.token_urlsafe(32))
 
     return TokenResponse(access_token=access_token)
 
 
 @auth_router.post("/logout")
-async def logout(response: Response):
-    response.delete_cookie(key="refresh_token", path="/api/auth")
+async def logout(
+    response: Response,
+    refresh_token: str = Cookie(None),
+    csrf_token: str = Cookie(None, alias=CSRF_COOKIE_NAME),
+    x_csrf_token: str = Header(None, alias=CSRF_HEADER_NAME),
+    db: AsyncSession = Depends(get_db),
+):
+    if refresh_token:
+        _validate_csrf(x_csrf_token, csrf_token)
+        try:
+            payload = decode_token(refresh_token)
+        except HTTPException:
+            payload = {}
+        jti = payload.get("jti") if payload.get("type") == "refresh" else None
+        if jti:
+            session = await get_refresh_session(db, hash_jti(jti))
+            if session:
+                await revoke_refresh_chain(db, session)
+                await db.commit()
+    _clear_auth_cookies(response)
     return {"message": "Logged out"}
 
 
@@ -174,7 +292,7 @@ async def get_me(user: User = Depends(get_current_user)):
     )
 
 
-@auth_router.post("/forgot-password")
+@auth_router.post("/forgot-password", dependencies=[Depends(ip_rate_limit("forgot_password"))])
 async def forgot_password(body: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
     GENERIC_MSG = "Если аккаунт с таким email существует, мы отправили ссылку для сброса пароля"
 
@@ -194,12 +312,12 @@ async def forgot_password(body: ForgotPasswordRequest, db: AsyncSession = Depend
         try:
             await send_password_reset_email(user.email, token, frontend_url)
         except Exception:
-            pass
+            logger.error("Failed to send password reset email to %s", user.email, exc_info=True)
 
     return {"message": GENERIC_MSG}
 
 
-@auth_router.post("/reset-password")
+@auth_router.post("/reset-password", dependencies=[Depends(ip_rate_limit("reset_password"))])
 async def reset_password(body: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
     token_hash = hashlib.sha256(body.token.encode()).hexdigest()
 
@@ -215,12 +333,13 @@ async def reset_password(body: ResetPasswordRequest, db: AsyncSession = Depends(
         user.reset_token_hash = None
         user.reset_token_expires = None
         await db.flush()
-        raise HTTPException(status_code=400, detail="Ссылка для сброса истекла")
+        raise HTTPException(status_code=400, detail="Недействительная или истёкшая ссылка")
 
     user.password_hash = hash_password(body.new_password)
 
     user.reset_token_hash = None
     user.reset_token_expires = None
+    await revoke_all_user_sessions(db, user.id)
     await db.flush()
     await db.commit()
 

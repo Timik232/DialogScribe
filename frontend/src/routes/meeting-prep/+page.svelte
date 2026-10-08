@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { fetchApi } from '$lib/services/api';
-	import { marked } from 'marked';
+	import { renderMarkdownSafe } from '$lib/services/safeHtml';
+	import SafeMarkdown from '$lib/components/SafeMarkdown.svelte';
 	import { Document, Packer, Paragraph, TextRun, HeadingLevel, Table, TableRow, TableCell, WidthType, BorderStyle, AlignmentType } from 'docx';
 	import { saveAs } from 'file-saver';
 
@@ -16,7 +17,6 @@
 	let resultMarkdown = $state('');
 	let resultModel = $state('');
 	let resultId = $state('');
-	let resultHtml = $derived(resultMarkdown ? (marked.parse(resultMarkdown, { breaks: true }) as string) : '');
 
 	let llmAvailable = $state(true);
 	let llmChecked = $state(false);
@@ -92,7 +92,7 @@
 
 	function exportHtml(): void {
 		if (!resultMarkdown) return;
-		const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Подготовка к встрече</title><style>body{font-family:Arial,sans-serif;max-width:800px;margin:2em auto;padding:0 1em;line-height:1.7;color:#222}h1{font-size:1.4em}h2{font-size:1.2em;margin-top:1.5em}h3{font-size:1.05em}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:6px 10px;text-align:left}th{background:#f5f5f5}</style></head><body>${resultHtml}</body></html>`;
+		const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Подготовка к встрече</title><style>body{font-family:Arial,sans-serif;max-width:800px;margin:2em auto;padding:0 1em;line-height:1.7;color:#222}h1{font-size:1.4em}h2{font-size:1.2em;margin-top:1.5em}h3{font-size:1.05em}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:6px 10px;text-align:left}th{background:#f5f5f5}</style></head><body>${renderMarkdownSafe(resultMarkdown, { breaks: true })}</body></html>`;
 		const blob = new Blob([html], { type: 'text/html; charset=utf-8' });
 		downloadBlob(blob, 'meeting-prep-plan.html');
 	}
@@ -271,9 +271,9 @@
 							</div>
 						</div>
 					</div>
-					<div class="result-content">
-						{@html resultHtml}
-					</div>
+				<div class="result-content">
+					<SafeMarkdown markdown={resultMarkdown} />
+				</div>
 				</div>
 			{/if}
 		</div>

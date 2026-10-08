@@ -3,6 +3,7 @@
 import logging
 import os
 from dataclasses import dataclass
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 import aiosmtplib
@@ -35,7 +36,8 @@ def get_smtp_config() -> SMTPConfig:
 async def send_email(to: str, subject: str, body: str, html_body: str | None = None) -> None:
     """Send an email using configured SMTP."""
     config = get_smtp_config()
-    msg = MIMEText(body, "plain", "utf-8")
+    msg = MIMEMultipart("alternative")
+    msg.attach(MIMEText(body, "plain", "utf-8"))
     if html_body:
         msg.attach(MIMEText(html_body, "html", "utf-8"))
     msg["From"] = config.from_address

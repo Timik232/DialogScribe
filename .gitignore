@@ -16,8 +16,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -161,3 +161,9 @@ vault/
 # Stray files in project root
 /*.png
 my_py_venv.txt
+
+# Throwaway dev SQLite default (gigaam_transcriber/database.py)
+/dialogscribe-dev.db
+
+# local disaster-recovery backups (contain full DB copies)
+/backups/

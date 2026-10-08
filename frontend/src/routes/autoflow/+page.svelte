@@ -1,11 +1,19 @@
 <script lang="ts">
 	import AudioUploader from '$lib/components/AudioUploader.svelte';
-	import { fetchApi } from '$lib/services/api';
+	import SafeMarkdown from '$lib/components/SafeMarkdown.svelte';
+	import MindmapViewer from '$lib/components/MindmapViewer.svelte';
+	import { fetchApi, fetchApiBlob } from '$lib/services/api';
+	import { authStore } from '$lib/stores/auth';
 
 	interface Template {
 		slug: string;
 		name: string;
 		emoji: string;
+	}
+
+	interface ModelInfo {
+		id: string;
+		name: string;
 	}
 
 	interface Segment {
@@ -26,7 +34,6 @@
 	interface AutoflowResult {
 		transcription?: Transcription;
 		summary?: string;
-		mindmap_html?: string;
 		mindmap_md?: string;
 		action_items?: { action_items?: Array<{ task: string; assignee?: string | null; deadline?: string | null; priority: string }>; decisions?: Array<{ decision: string; context: string }> };
 		suggested_steps?: { suggested_steps?: Array<{ step: string; reason: string; category: string }> };
@@ -34,10 +41,18 @@
 		stage_timings: Record<string, number>;
 	}
 
+	type StageKey = 'transcribe' | 'summary' | 'insights' | 'mindmap';
+	type StageStatus = 'pending' | 'active' | 'done' | 'skipped';
+
 	interface ProgressMessage {
-		stage: 'transcribing' | 'summarizing' | 'mindmap' | 'insights' | 'processing' | 'complete' | 'error';
+		type?: 'auth_ok' | 'ack' | 'status' | 'progress' | 'complete' | 'error';
+		stage: StageKey | 'upload' | 'skipped' | 'complete' | 'error';
 		progress?: number;
 		message?: string;
+		seq?: number;
+		session_id?: string;
+		skipped_stage?: StageKey;
+		code?: string;
 		result?: AutoflowResult;
 	}
 
@@ -46,25 +61,42 @@
 		'#FF6D01', '#46BDC6', '#7B61FF', '#F538A0'
 	];
 
-	const STAGES = [
-		{ key: 'transcribing', label: 'Транскрибация', icon: '🎤' },
-		{ key: 'summarizing', label: 'Саммари', icon: '📝' },
-		{ key: 'mindmap', label: 'Майндмэп', icon: '🗺️' },
-		{ key: 'insights', label: 'Инсайты', icon: '📋' }
-	] as const;
+	const STAGES: Array<{ key: StageKey; label: string; icon: string }> = [
+		{ key: 'transcribe', label: 'Транскрибация', icon: '🎤' },
+		{ key: 'summary', label: 'Саммари', icon: '📝' },
+		{ key: 'insights', label: 'Инсайты', icon: '📋' },
+		{ key: 'mindmap', label: 'Майндмэп', icon: '🗺️' }
+	];
+
+	const WS_CLOSE_MESSAGES: Record<number, string> = {
+		4400: 'Нарушение протокола WebSocket',
+		4401: 'Ошибка авторизации WebSocket',
+		4403: 'Аккаунт деактивирован',
+		4408: 'Таймаут авторизации WebSocket',
+		4413: 'Файл слишком большой для обработки'
+	};
+
+	function resetStages(): Record<StageKey, StageStatus> {
+		return { transcribe: 'pending', summary: 'pending', insights: 'pending', mindmap: 'pending' };
+	}
 
 	let selectedFile: File | null = $state(null);
 	let templateKey = $state('meeting');
 	let diarizationMode = $state('none');
 	let denoiseMode = $state('none');
 	let includeInsights = $state(false);
+	let includeSummary = $state(true);
+	let includeMindmap = $state(true);
+	let selectedModel = $state('');
 	let templates: Template[] = $state([]);
+	let models: ModelInfo[] = $state([]);
 
 	let loading = $state(false);
 	let error = $state('');
 	let disconnected = $state(false);
+	let cancelled = $state(false);
 
-	let currentStage: string = $state('');
+	let stageStatuses: Record<StageKey, StageStatus> = $state(resetStages());
 	let progressValue = $state(0);
 	let progressMessage = $state('');
 
@@ -74,8 +106,12 @@
 	let editingSpeaker: string | null = $state(null);
 	let editingSpeakerValue = $state('');
 
+	let activeSocket: WebSocket | null = null;
+	let uploadDone = false;
+
 	$effect(() => {
 		loadTemplates();
+		loadModels();
 	});
 
 	async function loadTemplates(): Promise<void> {
@@ -83,6 +119,15 @@
 			templates = await fetchApi<Template[]>('GET', '/api/templates');
 		} catch {
 			templates = [];
+		}
+	}
+
+	async function loadModels(): Promise<void> {
+		try {
+			const resp = await fetchApi<{ models: ModelInfo[] }>('GET', '/api/models');
+			models = resp.models || [];
+		} catch {
+			models = [];
 		}
 	}
 
@@ -120,16 +165,47 @@
 		error = '';
 	}
 
-	function fileToBase64(file: File): Promise<string> {
-		return new Promise((resolve, reject) => {
-			const reader = new FileReader();
-			reader.onload = () => {
-				const dataUrl = reader.result as string;
-				resolve(dataUrl.split(',')[1]);
-			};
-			reader.onerror = reject;
-			reader.readAsDataURL(file);
+	function getAccessToken(): string {
+		let token = '';
+		authStore.subscribe((s) => (token = s.accessToken))();
+		return token;
+	}
+
+	function applyStageEvent(msg: ProgressMessage): void {
+		if (msg.type !== 'progress' && msg.type !== 'status') return;
+
+		if (msg.stage === 'skipped') {
+			if (msg.skipped_stage) stageStatuses[msg.skipped_stage] = 'skipped';
+			return;
+		}
+		const idx = STAGES.findIndex((s) => s.key === msg.stage);
+		if (idx === -1) return;
+		STAGES.forEach((s, i) => {
+			if (i < idx && stageStatuses[s.key] === 'active') stageStatuses[s.key] = 'done';
 		});
+		stageStatuses[msg.stage as StageKey] = 'active';
+	}
+
+	function markRemainingDone(): void {
+		STAGES.forEach((s) => {
+			if (stageStatuses[s.key] !== 'skipped') stageStatuses[s.key] = 'done';
+		});
+	}
+
+	function cancelRun(): void {
+		if (!activeSocket) return;
+		cancelled = true;
+		loading = false;
+		progressMessage = 'Обработка отменена';
+		try {
+			if (uploadDone && activeSocket.readyState === WebSocket.OPEN) {
+				activeSocket.send(JSON.stringify({ type: 'cancel' }));
+			} else {
+				activeSocket.close();
+			}
+		} catch {
+			try { activeSocket.close(); } catch { /* socket already closed */ }
+		}
 	}
 
 	async function startAutoflow(): Promise<void> {
@@ -138,58 +214,99 @@
 		loading = true;
 		error = '';
 		disconnected = false;
+		cancelled = false;
 		result = null;
-		currentStage = 'transcribing';
+		stageStatuses = resetStages();
 		progressValue = 0;
 		progressMessage = 'Подключение...';
+		uploadDone = false;
 
 		try {
-			const fileData = await fileToBase64(selectedFile);
+			const token = getAccessToken();
+			if (!token) {
+				error = 'Требуется авторизация';
+				loading = false;
+				return;
+			}
+
+			const fileBuffer = await selectedFile.arrayBuffer();
 
 			const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 			const wsUrl = `${wsProtocol}//${window.location.host}/api/autoflow/ws`;
 			const ws = new WebSocket(wsUrl);
+			ws.binaryType = 'arraybuffer';
+			activeSocket = ws;
 
 			ws.onopen = () => {
+				ws.send(JSON.stringify({ type: 'auth', token, protocol: 1 }));
+			};
+
+			const uploadFile = () => {
 				ws.send(JSON.stringify({
-					file_data: fileData,
+					type: 'meta',
+					bytes: fileBuffer.byteLength,
 					filename: selectedFile!.name,
 					template_key: templateKey,
 					diarization_mode: diarizationMode,
 					denoise: denoiseMode,
-					include_summary: true,
-					include_mindmap: true,
+					include_summary: includeSummary,
+					include_mindmap: includeMindmap,
 					include_insights: includeInsights,
+					model: selectedModel || undefined
 				}));
+				const chunkSize = 256 * 1024;
+				for (let offset = 0; offset < fileBuffer.byteLength; offset += chunkSize) {
+					ws.send(fileBuffer.slice(offset, Math.min(offset + chunkSize, fileBuffer.byteLength)));
+				}
+				uploadDone = true;
+				progressMessage = 'Файл отправлен, обработка...';
 			};
 
 			ws.onmessage = (event) => {
 				const msg: ProgressMessage = JSON.parse(event.data);
 
-				if (msg.stage === 'error') {
-					error = msg.message || 'Неизвестная ошибка';
+				if (msg.type === 'auth_ok') {
+					uploadFile();
+					return;
+				}
+
+				if (msg.type === 'ack') {
+					return;
+				}
+
+				if (msg.type === 'error' || msg.stage === 'error') {
+					error = msg.code === 'limit_exceeded'
+						? `⏳ ${msg.message || 'Превышен лимит использования'}`
+						: msg.message || 'Неизвестная ошибка';
 					loading = false;
 					ws.close();
 					return;
 				}
 
-				if (msg.stage === 'complete') {
+				if (msg.type === 'complete' || msg.stage === 'complete') {
 					result = msg.result || null;
 					loading = false;
 					progressValue = 1;
 					progressMessage = 'Готово!';
+					markRemainingDone();
 					ws.close();
 					return;
 				}
 
-				currentStage = msg.stage;
-				progressValue = msg.progress ?? 0;
-				progressMessage = msg.message || '';
+				applyStageEvent(msg);
+				progressValue = msg.progress ?? progressValue;
+				if (msg.message) progressMessage = msg.message;
 			};
 
 			ws.onclose = (event) => {
+				activeSocket = null;
+				if (cancelled) return;
 				if (loading && !result) {
-					if (event.code !== 1000) {
+					if (event.code in WS_CLOSE_MESSAGES) {
+						error = event.reason
+							? `${WS_CLOSE_MESSAGES[event.code]}: ${event.reason}`
+							: WS_CLOSE_MESSAGES[event.code];
+					} else if (event.code !== 1000) {
 						disconnected = true;
 					}
 					loading = false;
@@ -197,7 +314,7 @@
 			};
 
 			ws.onerror = () => {
-				if (loading) {
+				if (loading && !cancelled) {
 					disconnected = true;
 					loading = false;
 				}
@@ -235,21 +352,16 @@
 
 	async function downloadExport(format: string, data: any, filename: string): Promise<void> {
 		try {
-			const res = await fetch('/api/export', {
-				method: 'POST',
+			const blob = await fetchApiBlob('POST', '/api/export', {
 				headers: { 'Content-Type': 'application/json' },
-				credentials: 'include',
 				body: JSON.stringify({
-				data,
-				format,
-				filename,
-				speaker_names: Object.keys(speakerNames).length > 0 ? speakerNames : undefined
-			})
+					data,
+					format,
+					filename,
+					speaker_names: Object.keys(speakerNames).length > 0 ? speakerNames : undefined
+				})
 			});
 
-			if (!res.ok) throw new Error('Экспорт не удался');
-
-			const blob = await res.blob();
 			const extMap: Record<string, string> = {
 				txt: '.txt', json: '.json', srt: '.srt',
 				vtt: '.vtt', docx: '.docx', pdf: '.pdf'
@@ -312,21 +424,42 @@
 					<option value="advanced">Расширенная</option>
 				</select>
 			</div>
-			<div class="field">
-				<label for="denoise">Шумоподавление</label>
-				<select id="denoise" class="input" bind:value={denoiseMode}>
-					<option value="none">Нет</option>
-					<option value="light">Лёгкое</option>
-					<option value="medium">Среднее</option>
-				</select>
-			</div>
-			<div class="field checkbox-field">
-				<label class="checkbox-label">
-					<input type="checkbox" bind:checked={includeInsights} />
-					<span>📋 Извлечь инсайты</span>
-				</label>
-			</div>
+		<div class="field">
+			<label for="denoise">Шумоподавление</label>
+			<select id="denoise" class="input" bind:value={denoiseMode}>
+				<option value="none">Нет</option>
+				<option value="light">Лёгкое</option>
+				<option value="medium">Среднее</option>
+			</select>
 		</div>
+		<div class="field">
+			<label for="model">Модель LLM</label>
+			<select id="model" class="input" bind:value={selectedModel}>
+				<option value="">По умолчанию</option>
+				{#each models as m}
+					<option value={m.id}>{m.name}</option>
+				{/each}
+			</select>
+		</div>
+		<div class="field checkbox-field">
+			<label class="checkbox-label">
+				<input type="checkbox" bind:checked={includeSummary} disabled={loading} />
+				<span>📝 Саммари</span>
+			</label>
+		</div>
+		<div class="field checkbox-field">
+			<label class="checkbox-label">
+				<input type="checkbox" bind:checked={includeMindmap} disabled={loading} />
+				<span>🗺️ Майндмэп</span>
+			</label>
+		</div>
+		<div class="field checkbox-field">
+			<label class="checkbox-label">
+				<input type="checkbox" bind:checked={includeInsights} disabled={loading} />
+				<span>📋 Инсайты</span>
+			</label>
+		</div>
+	</div>
 
 		<button
 			class="btn btn-primary autoflow-btn"
@@ -355,16 +488,30 @@
 		</div>
 	{/if}
 
-	{#if loading}
+	{#if loading || cancelled}
 		<section class="card progress-section">
 			<div class="stages-row">
 				{#each STAGES as stage, i}
-					<div class="stage-item" class:active={currentStage === stage.key} class:done={progressValue > (i + 1) / 3}>
+					<div
+						class="stage-item"
+						class:active={stageStatuses[stage.key] === 'active'}
+						class:done={stageStatuses[stage.key] === 'done'}
+						class:skipped={stageStatuses[stage.key] === 'skipped'}
+					>
 						<span class="stage-icon">{stage.icon}</span>
 						<span class="stage-label">{stage.label}</span>
+						<span class="stage-state">
+							{stageStatuses[stage.key] === 'skipped'
+								? 'отключено'
+								: stageStatuses[stage.key] === 'done'
+									? 'готово'
+									: stageStatuses[stage.key] === 'active'
+										? 'выполняется'
+										: 'ожидание'}
+						</span>
 					</div>
 					{#if i < STAGES.length - 1}
-						<div class="stage-connector" class:filled={progressValue > (i + 1) / 3}></div>
+						<div class="stage-connector" class:filled={stageStatuses[STAGES[i + 1].key] !== 'pending'}></div>
 					{/if}
 				{/each}
 			</div>
@@ -375,6 +522,14 @@
 
 			{#if progressMessage}
 				<p class="progress-message">{progressMessage}</p>
+			{/if}
+
+			{#if loading}
+				<div class="cancel-row">
+					<button class="btn btn-secondary cancel-btn" onclick={cancelRun}>
+						Отменить обработку
+					</button>
+				</div>
 			{/if}
 		</section>
 	{/if}
@@ -421,7 +576,7 @@
 					class="tab"
 					class:active={activeSection === 'mindmap'}
 					onclick={() => (activeSection = 'mindmap')}
-					disabled={!result.mindmap_html}
+					disabled={!result.mindmap_md}
 				>
 					<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="btn-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M9 6.75V15m6-6v8.25m.503 3.498l4.875-2.437c.381-.19.622-.58.622-1.006V4.82c0-.836-.88-1.38-1.628-1.006l-3.869 1.934c-.317.159-.69.159-1.006 0L9.503 3.252a1.125 1.125 0 00-1.006 0L3.622 5.689C3.24 5.88 3 6.27 3 6.695V19.18c0 .836.88 1.38 1.628 1.006l3.869-1.934c.317-.159.69-.159 1.006 0l4.994 2.497c.317.158.69.158 1.006 0z"/></svg>Майндмэп
 				</button>
@@ -485,16 +640,14 @@
 
 			{#if activeSection === 'summary' && result.summary}
 				<div class="section-content">
-					<div class="summary-content">
-						{@html result.summary.replace(/\n/g, '<br>')}
-					</div>
+					<SafeMarkdown class="summary-content" markdown={result.summary} />
 				</div>
 			{/if}
 
-			{#if activeSection === 'mindmap' && result.mindmap_html}
+			{#if activeSection === 'mindmap' && result.mindmap_md}
 				<div class="section-content">
 					<div class="mindmap-wrapper">
-						{@html result.mindmap_html}
+						<MindmapViewer markdown={result.mindmap_md} />
 					</div>
 				</div>
 			{/if}
@@ -699,6 +852,39 @@
 
 	.stage-item.done {
 		opacity: 0.75;
+	}
+
+	.stage-item.done .stage-label::after {
+		content: ' ✓';
+		color: var(--color-cta);
+	}
+
+	.stage-item.skipped {
+		opacity: 0.35;
+	}
+
+	.stage-item.skipped .stage-label {
+		text-decoration: line-through;
+	}
+
+	.stage-state {
+		font-size: 0.6875rem;
+		color: var(--color-muted);
+	}
+
+	.stage-item.active .stage-state {
+		color: var(--color-cta);
+	}
+
+	.cancel-row {
+		display: flex;
+		justify-content: center;
+		margin-top: 0.75rem;
+	}
+
+	.cancel-btn {
+		height: 36px;
+		font-size: 0.8125rem;
 	}
 
 	.stage-icon {

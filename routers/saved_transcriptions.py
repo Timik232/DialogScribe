@@ -1,11 +1,14 @@
+import asyncio
+import json
+import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from collections.abc import Mapping, Sequence
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import select, func as sa_func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,16 +21,82 @@ from gigaam_transcriber.models import SavedTranscription, User
 from gigaam_transcriber.summarizer import LLMClient, generate_summary
 from gigaam_transcriber.usage import track_usage
 
-from routers._helpers import logger
+from routers._helpers import api_error, logger
+from routers.correlation import get_correlation_id
 
 router = APIRouter(prefix="/api", tags=["saved-transcriptions"])
 
 llm_client = LLMClient()
 
+MAX_SAVED_PAYLOAD_MB = int(os.getenv("MAX_SAVED_PAYLOAD_MB", "5"))
+MAX_SAVED_PAYLOAD_BYTES = MAX_SAVED_PAYLOAD_MB * 1024 * 1024
+
+_SHARE_NOT_FOUND = "Shared transcription not found"
+
+
+def _payload_size_bytes(payload: Mapping[str, Any]) -> int:
+    return len(json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8"))
+
+
+def _reject_oversized(payload: Mapping[str, Any]) -> None:
+    if _payload_size_bytes(payload) > MAX_SAVED_PAYLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Payload too large. Maximum allowed is {MAX_SAVED_PAYLOAD_MB}MB",
+        )
+
+
+def _utcnow() -> datetime:
+    return datetime.utcnow()
+
+
+def _to_naive_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def _share_unavailable(obj: SavedTranscription | None, now: datetime | None = None) -> bool:
+    if obj is None:
+        return True
+    current = now or _utcnow()
+    if obj.share_revoked_at is not None:
+        return True
+    return obj.share_expires_at is not None and obj.share_expires_at <= current
+
 
 def _ensure_llm() -> None:
     if not llm_client.config.api_key:
         raise HTTPException(status_code=503, detail="LLM_API_KEY not configured")
+
+
+# ── Segments schema normalization ───────────────────────────────────
+
+
+def _normalize_segments(value: Any) -> list[Any]:
+    """Normalize a stored/legacy segments payload to the canonical list schema.
+
+    Legacy rows may hold dict shapes (empty {}, index-keyed {"0": ...}, or
+    {"segments": [...]}); every read path funnels through this helper so
+    clients always receive a list, with no data loss. The write path stores
+    the canonical list only.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, Mapping):
+        if not value:
+            return []
+        inner = value.get("segments") if "segments" in value else None
+        if isinstance(inner, list):
+            return inner
+        if all(str(k).isdigit() for k in value):
+            return [value[k] for k in sorted(value, key=int)]
+        return [dict(value)]
+    if isinstance(value, Sequence):
+        return list(value)
+    return [value]
 
 
 # ── Pydantic schemas ────────────────────────────────────────────────
@@ -56,6 +125,8 @@ class TranscriptionResponse(BaseModel):
     duration: float
     language: str
     share_id: str | None
+    share_expires_at: datetime | None = None
+    share_revoked_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -72,13 +143,27 @@ class TranscriptionListItem(BaseModel):
 class ShareResponse(BaseModel):
     share_id: str
     share_url: str
+    share_expires_at: datetime | None = None
+    share_revoked_at: datetime | None = None
+
+
+class ShareExpiryRequest(BaseModel):
+    expires_at: datetime | None = None
+    duration_seconds: int | None = None
+
+    @field_validator("duration_seconds")
+    @classmethod
+    def _positive_duration(cls, v: int | None) -> int | None:
+        if v is not None and v < 1:
+            raise ValueError("duration_seconds must be >= 1")
+        return v
 
 
 class PublicShareResponse(BaseModel):
     title: str
     full_text: str
     analysis_text: str | None = None
-    segments_json: list | None
+    segments_json: list | Mapping[str, Any] | None = None
     speaker_names: Mapping[str, Any] | None
     duration: float
     language: str
@@ -93,11 +178,13 @@ def _to_dict(t: SavedTranscription) -> dict[str, Any]:
         "title": t.title,
         "full_text": t.full_text,
         "analysis_text": t.analysis_text,
-        "segments_json": t.segments_json,
+        "segments_json": _normalize_segments(t.segments_json),
         "speaker_names": t.speaker_names,
         "duration": t.duration,
         "language": t.language,
         "share_id": t.share_id,
+        "share_expires_at": t.share_expires_at,
+        "share_revoked_at": t.share_revoked_at,
         "created_at": t.created_at,
         "updated_at": t.updated_at,
     }
@@ -133,12 +220,20 @@ async def create_transcription(
         raise HTTPException(status_code=422, detail="full_text must not be empty")
 
     title = body.title or _generate_default_title(body.duration)
+    _reject_oversized(
+        {
+            "title": title,
+            "full_text": body.full_text,
+            "segments": body.segments,
+            "speaker_names": body.speaker_names,
+        }
+    )
 
     obj = SavedTranscription(
         user_id=_user.id,
         title=title,
         full_text=body.full_text,
-        segments_json=body.segments or {},
+        segments_json=_normalize_segments(body.segments),
         speaker_names=body.speaker_names or {},
         duration=body.duration,
         language=body.language,
@@ -207,6 +302,13 @@ async def update_transcription(
     if not obj:
         raise HTTPException(status_code=404, detail="Transcription not found")
 
+    incoming: dict[str, Any] = {}
+    if body.title is not None:
+        incoming["title"] = body.title
+    if body.full_text is not None:
+        incoming["full_text"] = body.full_text
+    _reject_oversized(incoming)
+
     if body.title is not None:
         obj.title = body.title
     if body.full_text is not None:
@@ -264,10 +366,11 @@ async def analyze_transcription(
         raise HTTPException(status_code=400, detail="Transcription has no text to analyze")
 
     try:
-        summary_md = await generate_summary(obj.full_text, "general", llm_client)
-        mindmap_md = generate_mindmap_markdown(obj.full_text, llm_client)
-        insights = extract_action_items(obj.full_text, llm_client)
-        steps = generate_suggested_steps(obj.full_text, llm_client)
+        full_text = obj.full_text
+        summary_md = await generate_summary(full_text, "general", llm_client)
+        mindmap_md = await asyncio.to_thread(generate_mindmap_markdown, full_text, llm_client)
+        insights = await asyncio.to_thread(extract_action_items, full_text, llm_client)
+        steps = await asyncio.to_thread(generate_suggested_steps, full_text, llm_client)
 
         insights_parts = []
         if insights.get("action_items"):
@@ -306,13 +409,38 @@ async def analyze_transcription(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ConnectionError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise api_error(502, "upstream_unavailable", "Upstream LLM provider is unavailable") from exc
     except Exception as exc:
-        logger.exception("Analysis failed")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.exception("Analysis failed (correlation_id=%s)", get_correlation_id())
+        raise api_error(500, "internal_error", "Internal server error") from exc
 
 
 # ── Share endpoints ──────────────────────────────────────────────────
+
+async def _get_owned_transcription(
+    transcription_id: str, user: User, db: AsyncSession
+) -> SavedTranscription:
+    result = await db.execute(
+        select(SavedTranscription).where(
+            SavedTranscription.id == transcription_id,
+            SavedTranscription.user_id == user.id,
+        )
+    )
+    obj = result.scalar_one_or_none()
+    if not obj:
+        # 404 (not 403) so other users' resource existence is never leaked
+        raise HTTPException(status_code=404, detail="Transcription not found")
+    return obj
+
+
+def _share_response(obj: SavedTranscription) -> ShareResponse:
+    return ShareResponse(
+        share_id=obj.share_id or "",
+        share_url=f"/share/{obj.share_id}",
+        share_expires_at=obj.share_expires_at,
+        share_revoked_at=obj.share_revoked_at,
+    )
+
 
 @router.post("/saved-transcriptions/{transcription_id}/share")
 async def create_share(
@@ -320,22 +448,15 @@ async def create_share(
     _user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(SavedTranscription).where(
-            SavedTranscription.id == transcription_id,
-            SavedTranscription.user_id == _user.id,
-        )
-    )
-    obj = result.scalar_one_or_none()
-    if not obj:
-        raise HTTPException(status_code=404, detail="Transcription not found")
+    obj = await _get_owned_transcription(transcription_id, _user, db)
 
-    if obj.share_id:
-        return ShareResponse(share_id=obj.share_id, share_url=f"/share/{obj.share_id}")
-
-    obj.share_id = str(uuid.uuid4())
+    if not obj.share_id:
+        obj.share_id = str(uuid.uuid4())
+    # Re-issuing a share on a revoked link re-activates it; a configured
+    # expiry is intentionally preserved as explicit owner state.
+    obj.share_revoked_at = None
     await db.commit()
-    return ShareResponse(share_id=obj.share_id, share_url=f"/share/{obj.share_id}")
+    return _share_response(obj)
 
 
 @router.delete("/saved-transcriptions/{transcription_id}/share")
@@ -344,19 +465,79 @@ async def revoke_share(
     _user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(SavedTranscription).where(
-            SavedTranscription.id == transcription_id,
-            SavedTranscription.user_id == _user.id,
-        )
-    )
-    obj = result.scalar_one_or_none()
-    if not obj:
-        raise HTTPException(status_code=404, detail="Transcription not found")
+    obj = await _get_owned_transcription(transcription_id, _user, db)
 
     obj.share_id = None
+    obj.share_expires_at = None
+    obj.share_revoked_at = None
     await db.commit()
     return {"detail": "Share revoked"}
+
+
+@router.post("/saved-transcriptions/{transcription_id}/share/revoke")
+async def soft_revoke_share(
+    transcription_id: str,
+    _user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Mark the link revoked (public access stops) but keep the share_id."""
+    obj = await _get_owned_transcription(transcription_id, _user, db)
+
+    if not obj.share_id:
+        raise HTTPException(status_code=404, detail="Transcription not found")
+    if obj.share_revoked_at is None:
+        obj.share_revoked_at = _utcnow()
+    await db.commit()
+    return _share_response(obj)
+
+
+@router.post("/saved-transcriptions/{transcription_id}/share/unrevoke")
+async def unrevoke_share(
+    transcription_id: str,
+    _user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    obj = await _get_owned_transcription(transcription_id, _user, db)
+
+    if not obj.share_id:
+        raise HTTPException(status_code=404, detail="Transcription not found")
+    obj.share_revoked_at = None
+    await db.commit()
+    return _share_response(obj)
+
+
+@router.put("/saved-transcriptions/{transcription_id}/share/expiry")
+async def set_share_expiry(
+    transcription_id: str,
+    body: ShareExpiryRequest,
+    _user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set share expiry from an ISO datetime or a duration in seconds.
+
+    Both fields empty clears the expiry (share never expires).
+    """
+    obj = await _get_owned_transcription(transcription_id, _user, db)
+
+    if not obj.share_id:
+        raise HTTPException(status_code=404, detail="Transcription not found")
+
+    if body.expires_at is not None and body.duration_seconds is not None:
+        raise HTTPException(
+            status_code=422, detail="Provide either expires_at or duration_seconds, not both"
+        )
+
+    if body.expires_at is not None:
+        expires_at = _to_naive_utc(body.expires_at)
+        if expires_at <= _utcnow():
+            raise HTTPException(status_code=422, detail="expires_at must be in the future")
+        obj.share_expires_at = expires_at
+    elif body.duration_seconds is not None:
+        obj.share_expires_at = _utcnow() + timedelta(seconds=body.duration_seconds)
+    else:
+        obj.share_expires_at = None
+    await db.commit()
+    return _share_response(obj)
 
 
 # ── Public share endpoint (NO AUTH) ─────────────────────────────────
@@ -372,14 +553,16 @@ async def get_shared_transcription(
         )
     )
     obj = result.scalar_one_or_none()
-    if not obj:
-        raise HTTPException(status_code=404, detail="Shared transcription not found")
+    # Unknown, revoked and expired links are indistinguishable on purpose:
+    # the exact same 404 shape is returned so share existence is never leaked.
+    if _share_unavailable(obj):
+        raise HTTPException(status_code=404, detail=_SHARE_NOT_FOUND)
 
     return PublicShareResponse(
         title=obj.title,
         full_text=obj.full_text,
         analysis_text=obj.analysis_text,
-        segments_json=obj.segments_json,
+        segments_json=_normalize_segments(obj.segments_json),
         speaker_names=obj.speaker_names,
         duration=obj.duration,
         language=obj.language,

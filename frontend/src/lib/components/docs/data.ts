@@ -162,8 +162,7 @@ const data = await response.json();`,
 		successResponse: {
 			status: 200,
 			body: `{
-  "summary_markdown": "## Краткое содержание\\n\\nОсновные тезисы...",
-  "summary_html": "<h2>Краткое содержание</h2><p>Основные тезисы...</p>"
+  "summary_markdown": "## Краткое содержание\\n\\nОсновные тезисы..."
 }`
 		},
 		errorResponses: [
@@ -195,9 +194,7 @@ const data = await response.json();`,
 		successResponse: {
 			status: 200,
 			body: `{
-  "mindmap_markdown": "# Тема\\n## Подтема 1\\n- Пункт 1\\n- Пункт 2",
-  "mindmap_uid": "mm_a1b2c3",
-  "mindmap_html": "<ul><li>Тема<ul><li>Подтема 1..."
+  "mindmap_markdown": "# Тема\\n## Подтема 1\\n- Пункт 1\\n- Пункт 2"
 }`
 		},
 		errorResponses: [
@@ -459,8 +456,7 @@ ws.onmessage = (event) => {
   "stage": "complete",
   "result": {
     "transcription": { "segments": [...], "text": "..." },
-    "summary": { "summary_markdown": "..." },
-    "mindmap_html": "<ul>...</ul>",
+    "summary": "## Краткое содержание...",
     "mindmap_md": "# Тема...",
     "action_items": ["Пункт 1"],
     "suggested_steps": ["Шаг 1"],

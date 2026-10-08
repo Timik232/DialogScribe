@@ -9,6 +9,8 @@ import logging
 import re
 from typing import Optional
 
+import tiktoken
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -94,6 +96,35 @@ def estimate_tokens(text: str) -> int:
     return int(total) if total > 0 else 0
 
 
+def estimate_tokens_accurate(text: str, model: str) -> int:
+    """Оценка токенов через tiktoken с каскадным fallback.
+
+    1. tiktoken.encoding_for_model(model) — точная токенизация
+    2. tiktoken.get_encoding("cl100k_base") — универсальный fallback
+    3. estimate_tokens(text) — эвристика по символам
+
+    Добавляет 10% safety margin к результату tiktoken.
+    """
+    if not text:
+        return 0
+
+    try:
+        encoding = tiktoken.encoding_for_model(model)
+        count = len(encoding.encode(text))
+        return int(count * 1.1)
+    except KeyError:
+        pass
+
+    try:
+        encoding = tiktoken.get_encoding("cl100k_base")
+        count = len(encoding.encode(text))
+        return int(count * 1.1)
+    except Exception:
+        pass
+
+    return estimate_tokens(text)
+
+
 # ---------------------------------------------------------------------------
 # Лимит контекста модели
 # ---------------------------------------------------------------------------
@@ -132,6 +163,7 @@ def get_context_budget(
     system_prompt: str,
     text: str,
     history: Optional[list[dict]] = None,
+    max_tokens: Optional[int] = None,
 ) -> dict:
     """Рассчитать доступный контекстный бюджет.
 
@@ -140,6 +172,7 @@ def get_context_budget(
         system_prompt: Системный промпт.
         text: Основной текст (транскрипция).
         history: История сообщений чата (опционально).
+        max_tokens: Максимальные выходные токены модели (опционально).
 
     Returns:
         Dict с ключами:
@@ -147,25 +180,32 @@ def get_context_budget(
         - used_prompt: токены system_prompt
         - used_text: токены text
         - used_history: токены history
+        - output_reserve: зарезервированные токены для ответа
         - available: доступные токены
         - needs_compression: bool (True если used >= 50% от total)
     """
     total = get_model_context_limit(model)
-    used_prompt = estimate_tokens(system_prompt)
-    used_text = estimate_tokens(text)
+    used_prompt = estimate_tokens_accurate(system_prompt, model) if model else estimate_tokens(system_prompt)
+    used_text = estimate_tokens_accurate(text, model) if model else estimate_tokens(text)
     used_history = 0
     if history:
         for msg in history:
-            used_history += estimate_tokens(msg.get("content", ""))
+            used_history += estimate_tokens_accurate(msg.get("content", ""), model) if model else estimate_tokens(msg.get("content", ""))
+
+    output_reserve = min(
+        max_tokens if max_tokens is not None else int(total * 0.2),
+        int(total * 0.3),
+    )
 
     used = used_prompt + used_text + used_history
-    available = max(0, total - used)
+    available = max(0, total - used - output_reserve)
 
     return {
         "total": total,
         "used_prompt": used_prompt,
         "used_text": used_text,
         "used_history": used_history,
+        "output_reserve": output_reserve,
         "available": available,
         "needs_compression": used >= total * 0.5,
     }
@@ -176,10 +216,17 @@ def get_context_budget(
 # ---------------------------------------------------------------------------
 
 
+def _count_tokens(text: str, model: Optional[str] = None) -> int:
+    if model:
+        return estimate_tokens_accurate(text, model)
+    return estimate_tokens(text)
+
+
 def split_into_chunks(
     text: str,
     max_tokens: int = 3000,
     overlap_sentences: int = 2,
+    model: Optional[str] = None,
 ) -> list[str]:
     """Разбить текст на чанки по границам предложений с перекрытием.
 
@@ -187,6 +234,8 @@ def split_into_chunks(
         text: Исходный текст.
         max_tokens: Максимум токенов на чанк.
         overlap_sentences: Количество предложений перекрытия.
+        model: Опционально — имя модели для точной оценки токенов
+               через estimate_tokens_accurate.
 
     Returns:
         Список чанков. Если текст короткий — один элемент.
@@ -194,7 +243,7 @@ def split_into_chunks(
     if not text or not text.strip():
         return [text] if text else []
 
-    if estimate_tokens(text) <= max_tokens:
+    if _count_tokens(text, model) <= max_tokens:
         return [text]
 
     # Split by sentence boundaries: `.`, `!`, `?`, `\n`
@@ -202,7 +251,6 @@ def split_into_chunks(
     sentences = [s for s in sentences if s.strip()]
 
     if len(sentences) <= 1:
-        # Fallback: split by words
         words = text.split()
         chunk_size = max(1, max_tokens * 2)  # ~2 chars/token for mixed
         chunks = []
@@ -215,12 +263,11 @@ def split_into_chunks(
     current_tokens = 0
 
     for sentence in sentences:
-        sent_tokens = estimate_tokens(sentence)
+        sent_tokens = _count_tokens(sentence, model)
         if current_tokens + sent_tokens > max_tokens and current_chunk:
             chunks.append(" ".join(current_chunk))
-            # Keep overlap sentences
             current_chunk = current_chunk[-overlap_sentences:] if overlap_sentences > 0 else []
-            current_tokens = sum(estimate_tokens(s) for s in current_chunk)
+            current_tokens = sum(_count_tokens(s, model) for s in current_chunk)
 
         current_chunk.append(sentence)
         current_tokens += sent_tokens

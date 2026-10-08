@@ -31,6 +31,14 @@
 	let transcriptContainer: HTMLDivElement | undefined = $state();
 	let errorMessage = $state('');
 	let errorTimer: ReturnType<typeof setTimeout> | undefined;
+	let backpressure = $state({ dropped: 0, invalid: 0, recv: 0, process: 0, recvCap: 0, processCap: 0 });
+
+	const backpressureActive = $derived(
+		backpressure.dropped > 0 ||
+			backpressure.invalid > 0 ||
+			(backpressure.recvCap > 0 && backpressure.recv / backpressure.recvCap >= 0.8) ||
+			(backpressure.processCap > 0 && backpressure.process / backpressure.processCap >= 0.8)
+	);
 
 	$effect(() => {
 		loadTemplates();
@@ -99,13 +107,25 @@
 				}, 5000);
 			};
 
-			client.onStatus = (data) => {
-				const status = data.status;
-				if (status === 'ready') {
-					sessionStatus = 'active';
-					wsConnected = true;
-				}
-			};
+		client.onStatus = (data) => {
+			const status = data.status;
+			if (status === 'ready') {
+				sessionStatus = 'active';
+				wsConnected = true;
+			}
+			const queues = data.queues as { recv?: number; process?: number } | undefined;
+			if (queues) {
+				const caps = (data.caps ?? {}) as { recv_queue?: number; process_queue?: number };
+				backpressure = {
+					dropped: Number(data.dropped ?? 0),
+					invalid: Number(data.invalid_chunks ?? 0),
+					recv: Number(queues.recv ?? 0),
+					process: Number(queues.process ?? 0),
+					recvCap: Number(caps.recv_queue ?? 0),
+					processCap: Number(caps.process_queue ?? 0)
+				};
+			}
+		};
 
 			client.onReconnecting = () => {
 				sessionStatus = 'reconnecting';
@@ -148,9 +168,9 @@
 		}
 	}
 
-	function handleAudioChunk(audio_b64: string, source: 'mic' | 'tab'): void {
+	function handleAudioChunk(audio: ArrayBuffer, source: 'mic' | 'tab'): void {
 		if (wsClient) {
-			wsClient.sendAudioChunk(audio_b64, source);
+			wsClient.sendAudioChunk(audio, source);
 		}
 	}
 
@@ -207,6 +227,14 @@
 						Ошибка
 					{/if}
 				</span>
+				{#if backpressureActive}
+					<span
+						class="status-badge bp-badge"
+						title={`Очереди: ${backpressure.recv}/${backpressure.recvCap} · обработка: ${backpressure.process}/${backpressure.processCap} · отброшено чанков: ${backpressure.dropped} · некорректных: ${backpressure.invalid}`}
+					>
+						⚠ {backpressure.dropped > 0 ? `отброшено: ${backpressure.dropped}` : 'очередь на пределе'}
+					</span>
+				{/if}
 				<button
 					class="btn btn-primary session-btn"
 					onclick={toggleSession}
@@ -346,6 +374,12 @@
 		background: var(--color-error-bg);
 		color: var(--color-error-text);
 		border-color: var(--color-error-border);
+	}
+
+	.bp-badge {
+		background: rgba(234, 179, 8, 0.1);
+		color: #b45309;
+		border-color: #f59e0b;
 	}
 
 	.error-banner {
