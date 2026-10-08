@@ -14,6 +14,7 @@ import concurrent.futures
 import contextlib
 import inspect
 import logging
+import math
 import os
 import shutil
 import threading
@@ -47,13 +48,6 @@ from .segment_merger import MergeConfig, SegmentMerger
 
 logger = logging.getLogger(__name__)
 
-CHUNK_THRESHOLD_SEC = 1800.0
-CHUNK_DURATION_SEC = 300.0
-
-_TRANSCRIPTION_MAX_CONCURRENT_DEFAULT = 2
-_CHUNK_CONCURRENCY_DEFAULT = 3
-
-
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
     if not raw:
@@ -64,6 +58,30 @@ def _env_int(name: str, default: int) -> int:
         logger.warning("Некорректное %s=%r, используется значение по умолчанию %d", name, raw, default)
         return default
 
+
+def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Некорректное %s=%r, используется значение по умолчанию %s", name, raw, default)
+        return default
+    if value < minimum:
+        logger.warning("%s=%r ниже минимума %s, используется минимум", name, raw, minimum)
+        return minimum
+    return value
+
+
+# ASR-бэкенд (LiteLLM → triton-openai-adapter) принимает файлы до 25 MiB —
+# это ~819 c WAV 16kHz-mono (32 КБ/с). Порог чанкования 600 c держит
+# одиночный запрос ≤ 19.2 МБ (запас до лимита), чанк 300 c — ≤ 9.6 МБ.
+CHUNK_THRESHOLD_SEC = _env_float("TRANSCRIPTION_CHUNK_THRESHOLD_SEC", 600.0, minimum=1.0)
+CHUNK_DURATION_SEC = _env_float("TRANSCRIPTION_CHUNK_DURATION_SEC", 300.0, minimum=1.0)
+
+_TRANSCRIPTION_MAX_CONCURRENT_DEFAULT = 2
+_CHUNK_CONCURRENCY_DEFAULT = 3
 
 class _TranscriptionLimiter:
     """Process-wide bound on concurrent transcription work.
@@ -572,18 +590,16 @@ class GigaAMTranscriber:
                     {"start": seg.start, "end": seg.end, "speaker": seg.speaker}
                     for seg in speaker_segments
                 ]
+                segment_dicts, group_sizes = self._split_oversized_segments(
+                    segment_dicts, self.chunk_duration,
+                )
                 api_segments = session.call(
                     "transcribe_segments", str(working_audio), segment_dicts,
                     language=language,
                 )
                 segments = [
-                    TranscriptionSegment(
-                        text=seg.text.strip(),
-                        start=seg.start,
-                        end=seg.end,
-                        speaker=seg.speaker,
-                    )
-                    for seg in api_segments
+                    seg
+                    for seg in self._recombine_subsegments(api_segments, speaker_segments, group_sizes)
                     if seg.text and seg.text.strip()
                 ]
                 if not segments:
@@ -605,6 +621,69 @@ class GigaAMTranscriber:
                     temp_audio.unlink()
                 except Exception:
                     pass
+
+    @staticmethod
+    def _split_oversized_segments(
+        segment_dicts: List[Dict[str, Any]],
+        max_duration: float,
+    ) -> tuple[List[Dict[str, Any]], List[int]]:
+        """Нарезать сегменты длиннее ``max_duration`` на части того же спикера.
+
+        Один запрос к ASR-провайдеру ограничен размером файла бэкенда
+        (25 MiB ≈ 819 c WAV 16kHz-mono), поэтому монолог длиннее лимита
+        делится на подряд идущие подсегменты. Возвращает ``(подсегменты,
+        group_sizes)``, где ``group_sizes[i]`` — число подсегментов исходного
+        сегмента ``i``; ``_recombine_subsegments`` склеивает их обратно.
+        """
+        if max_duration <= 0:
+            return segment_dicts, [1] * len(segment_dicts)
+        result: List[Dict[str, Any]] = []
+        group_sizes: List[int] = []
+        for seg in segment_dicts:
+            start = float(seg["start"])
+            end = float(seg["end"])
+            duration = end - start
+            if duration <= max_duration:
+                result.append(seg)
+                group_sizes.append(1)
+                continue
+            parts = math.ceil(duration / max_duration)
+            step = duration / parts
+            for i in range(parts):
+                result.append(
+                    {
+                        "start": start + i * step,
+                        "end": min(start + (i + 1) * step, end),
+                        "speaker": seg.get("speaker"),
+                    }
+                )
+            group_sizes.append(parts)
+        return result, group_sizes
+
+    @staticmethod
+    def _recombine_subsegments(
+        api_segments: List[TranscriptionSegment],
+        speaker_segments: List[Any],
+        group_sizes: List[int],
+    ) -> List[TranscriptionSegment]:
+        """Склеить тексты подсегментов обратно в исходные сегменты спикеров."""
+        result: List[TranscriptionSegment] = []
+        idx = 0
+        for seg, count in zip(speaker_segments, group_sizes):
+            pieces = api_segments[idx:idx + count]
+            idx += count
+            text = " ".join(
+                piece.text.strip() for piece in pieces if piece.text and piece.text.strip()
+            )
+            result.append(
+                TranscriptionSegment(
+                    text=text,
+                    start=seg.start,
+                    end=seg.end,
+                    speaker=seg.speaker,
+                )
+            )
+        return result
 
     def _transcribe_chunked(
         self,
