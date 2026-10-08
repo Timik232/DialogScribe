@@ -89,16 +89,19 @@ class TestSendEmail:
             assert result is None
 
     @pytest.mark.asyncio
-    async def test_send_email_with_html_body_raises_multipart_error(self):
-        from email.errors import MultipartConversionError
-
-        with pytest.raises(MultipartConversionError):
+    async def test_send_email_with_html_body_builds_multipart(self):
+        with patch("gigaam_transcriber.email.aiosmtplib.send", new_callable=AsyncMock) as mock_send:
             await send_email(
                 to="user@test.com",
                 subject="HTML Test",
                 body="Plain text",
                 html_body="<p>HTML</p>",
             )
+            mock_send.assert_awaited_once()
+            msg = mock_send.call_args[0][0]
+            assert msg.get_content_type() == "multipart/alternative"
+            parts = [p.get_content_type() for p in msg.walk()]
+            assert "text/plain" in parts and "text/html" in parts
 
 
 class TestSendPasswordResetEmail:
