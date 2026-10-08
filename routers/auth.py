@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import os
 import re
 import secrets
@@ -32,6 +33,8 @@ from gigaam_transcriber.sessions import (
     rotate_refresh_session,
 )
 from gigaam_transcriber.settings import is_development
+
+logger = logging.getLogger(__name__)
 
 auth_router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -309,7 +312,7 @@ async def forgot_password(body: ForgotPasswordRequest, db: AsyncSession = Depend
         try:
             await send_password_reset_email(user.email, token, frontend_url)
         except Exception:
-            pass
+            logger.error("Failed to send password reset email to %s", user.email, exc_info=True)
 
     return {"message": GENERIC_MSG}
 
