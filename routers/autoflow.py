@@ -3,12 +3,15 @@ import json
 import logging
 import os
 import uuid
+from datetime import datetime
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from gigaam_transcriber.autoflow import AutoflowStage, StageEvent, run_autoflow
 from gigaam_transcriber.database import async_session_factory
 from gigaam_transcriber.limits import check_limit
+from gigaam_transcriber.models import SavedTranscription
 from gigaam_transcriber.summarizer import LLMClient, LLMClientConfig
 from gigaam_transcriber.usage import track_usage
 from routers.correlation import get_correlation_id
@@ -24,6 +27,86 @@ from routers._helpers import SUPPORTED_EXTENSIONS, _map_diarization
 
 logger = logging.getLogger("dialogscribe-autoflow")
 router = APIRouter(prefix="/api/autoflow", tags=["autoflow"])
+
+# Detached autoflow continuations (client gone mid-work). Kept in a module
+# level set purely so the event loop retains a strong reference to tasks that
+# no coroutine is awaiting; the done-callback removes them on completion.
+_DETACHED_TASKS: set[asyncio.Task] = set()
+
+
+async def _persist_autoflow_result(
+    app: Any,
+    user_id: str,
+    result: Any,
+    session_id: str,
+) -> SavedTranscription | None:
+    """Persist a finished autoflow run as a SavedTranscription row.
+
+    The transcription text becomes durable server-side regardless of whether
+    the client is still connected to receive the WS terminal event. Analysis
+    artifacts (summary/mindmap/insights/steps) are stored as analysis_text.
+    Failures are logged and swallowed: persistence must never break delivery
+    of an already-successful result to a live client.
+    """
+    tr = getattr(result, "transcription_result", None)
+    if tr is None or not getattr(tr, "text", None):
+        return None
+
+    def _seg_json(s: Any) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "text": s.text,
+            "start": s.start,
+            "end": s.end,
+        }
+        if s.speaker is not None:
+            payload["speaker"] = s.speaker
+        if s.confidence is not None:
+            payload["confidence"] = s.confidence
+        return payload
+
+    segments = [_seg_json(s) for s in tr.segments]
+    now = datetime.utcnow()
+    mins = int(tr.duration or 0) // 60
+    secs = int(tr.duration or 0) % 60
+    title = f"Autoflow {now.strftime('%d.%m.%Y %H:%M')} — {mins}m {secs}s"
+
+    analysis_parts: list[str] = []
+    if getattr(result, "summary_text", None):
+        analysis_parts.append(f"# Сводка\n{result.summary_text}")
+    if getattr(result, "mindmap_md", None):
+        analysis_parts.append(f"# Интеллект-карта\n{result.mindmap_md}")
+    items = getattr(result, "action_items", None)
+    if items:
+        analysis_parts.append(
+            "# Задачи\n" + "\n".join(f"- {item}" for item in items)
+        )
+    steps = getattr(result, "suggested_steps", None)
+    if steps:
+        analysis_parts.append(
+            "# Предлагаемые шаги\n"
+            + "\n".join(f"{i + 1}. {step}" for i, step in enumerate(steps))
+        )
+    analysis_text = "\n\n".join(analysis_parts) if analysis_parts else None
+
+    obj = SavedTranscription(
+        user_id=user_id,
+        title=title,
+        full_text=tr.text,
+        segments_json=segments,
+        speaker_names={},
+        duration=tr.duration or 0.0,
+        language=tr.language or "ru",
+        analysis_text=analysis_text,
+    )
+    async with async_session_factory() as db:
+        db.add(obj)
+        await db.commit()
+    logger.info(
+        "Autoflow session %s persisted as saved transcription %s",
+        session_id,
+        getattr(obj, "id", "?"),
+    )
+    return obj
 
 
 def _get_ext(filename: str) -> str:
@@ -122,14 +205,19 @@ async def autoflow_ws(ws: WebSocket):
             )
             return
 
+        # A transport disconnect (screen off, app killed, network drop) is NOT
+        # a user cancellation: the work keeps running and the result is
+        # persisted so it can be picked up later. Only an explicit
+        # {"type": "cancel"} control frame cancels.
         cancelled = asyncio.Event()
+        client_gone = asyncio.Event()
 
         async def watch_controls() -> None:
             try:
                 while True:
                     msg = await ws.receive()
                     if msg.get("type") != "websocket.receive":
-                        cancelled.set()
+                        client_gone.set()
                         return
                     if "bytes" in msg:
                         continue
@@ -141,10 +229,10 @@ async def autoflow_ws(ws: WebSocket):
                         cancelled.set()
                         return
             except (WebSocketDisconnect, RuntimeError):
-                cancelled.set()
+                client_gone.set()
             except Exception:
                 logger.debug("autoflow control watcher stopped", exc_info=True)
-                cancelled.set()
+                client_gone.set()
 
         async def process():
             async with async_session_factory() as db:
@@ -177,6 +265,39 @@ async def autoflow_ws(ws: WebSocket):
             logger.info("Autoflow session %s cancelled by client", session_id)
             return
 
+        if client_gone.is_set() and not work_task.done():
+            # Transport died mid-work: keep the job running detached. When it
+            # finishes, the result is persisted (see _persist_autoflow_result)
+            # so the user can retrieve it from the transcriptions list later.
+            logger.info(
+                "Autoflow session %s: client disconnected, work continues detached",
+                session_id,
+            )
+            watch_task.cancel()
+            app_ref = ws.app
+
+            async def _finish_detached() -> None:
+                try:
+                    result = await work_task
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("Detached autoflow session %s failed", session_id)
+                    return
+                try:
+                    await _persist_autoflow_result(app_ref, identity.user_id, result, session_id)
+                except Exception:
+                    logger.exception(
+                        "Failed to persist detached autoflow session %s", session_id
+                    )
+
+            detached = asyncio.create_task(
+                _finish_detached(), name=f"autoflow-detached-{session_id}"
+            )
+            _DETACHED_TASKS.add(detached)
+            detached.add_done_callback(_DETACHED_TASKS.discard)
+            return
+
         watch_task.cancel()
         result = work_task.result()
 
@@ -186,6 +307,8 @@ async def autoflow_ws(ws: WebSocket):
                 await track_usage(db, identity.user_id, "transcription_minutes", duration_minutes)
                 await track_usage(db, identity.user_id, "file_upload", 1.0)
                 await db.commit()
+
+        await _persist_autoflow_result(ws.app, identity.user_id, result, session_id)
 
         response_data: dict = {
             "errors": result.errors,
