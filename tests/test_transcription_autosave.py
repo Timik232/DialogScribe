@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import routers.transcription as transcription_router
-from tests.conftest import setup_auth_override
+from tests.conftest import make_mock_user
 
 
 @pytest.fixture(scope="module")
@@ -32,10 +32,17 @@ def client():
 
         asyncio.run(_create_tables())
 
-        setup_auth_override(app)
+        # Key the override by the function object the ROUTER module holds.
+        # Earlier suites (test_settings_validation) importlib.reload() the
+        # auth module, which desynchronizes ``from ... import get_current_user``
+        # in conftest vs the router — the override silently stops matching
+        # (401s) in full-run order. Referencing via the router module keeps
+        # the exact object the app's routes were built with.
+        auth_key = transcription_router.get_current_user
+        app.dependency_overrides[auth_key] = lambda: make_mock_user()
         with TestClient(app) as c:
             yield c, mock_transcriber
-        app.dependency_overrides.clear()
+        app.dependency_overrides.pop(auth_key, None)
 
 
 def _mock_result(text="Hello world", duration=1.5):

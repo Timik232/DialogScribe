@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import setup_auth_override
+from tests.conftest import make_mock_user
 
 
 @pytest.fixture()
@@ -61,10 +61,16 @@ def client(job_env):
 
         asyncio.run(_create_tables())
 
-        setup_auth_override(app)
+        # Key the override by the router-held function object — see the
+        # note in tests/test_transcription_autosave.py about importlib.reload
+        # in earlier suites desynchronizing conftest's auth import.
+        import routers.jobs as rj
+
+        auth_key = rj.get_current_user
+        app.dependency_overrides[auth_key] = lambda: make_mock_user()
         with TestClient(app) as c:
             yield c, mock_transcriber, app
-        app.dependency_overrides.clear()
+        app.dependency_overrides.pop(auth_key, None)
 
 
 def _wait_terminal(client, job_id, timeout=5.0):
