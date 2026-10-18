@@ -10,16 +10,13 @@ from typing import Annotated, cast
 import uvicorn
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from gigaam_transcriber import GigaAMTranscriber
-from gigaam_transcriber.auth import bootstrap_admin, get_current_user
+from gigaam_transcriber.auth import bootstrap_admin
+from gigaam_transcriber.database import async_session_factory
 from gigaam_transcriber.rate_limit import ip_rate_limit
 from gigaam_transcriber.settings import is_development
 from gigaam_transcriber.utils import setup_logging
-from gigaam_transcriber.database import async_session_factory
-from gigaam_transcriber.models import User
-
 from routers._helpers import (
     _handle_transcription_exception,
     _map_format,
@@ -61,6 +58,15 @@ async def lifespan(app: FastAPI):
     swept = await asyncio.to_thread(sweep_stale_tempfiles)
     if swept:
         logger.info("Startup sweep removed %d stale upload temp files", swept)
+
+    # Fail jobs orphaned by the previous process so their owners see a
+    # terminal state instead of an eternal "processing".
+    from gigaam_transcriber.jobs import recover_stale_jobs
+
+    try:
+        await recover_stale_jobs()
+    except Exception:
+        logger.exception("Job recovery sweep failed")
 
     # Bootstrap admin user from ADMIN_EMAIL / ADMIN_PASSWORD env vars
     async with async_session_factory() as db:
@@ -188,11 +194,25 @@ def create_transcription(
         raise _handle_transcription_exception(e)
 
 
-from routers import admin, analysis, autoflow, exports, live_hints, meeting_prep, saved_transcriptions, settings, templates, transcription, usage  # noqa: E402
+from routers import (  # noqa: E402
+    admin,
+    analysis,
+    autoflow,
+    exports,
+    jobs,
+    live_hints,
+    meeting_prep,
+    saved_transcriptions,
+    settings,
+    templates,
+    transcription,
+    usage,
+)
 from routers.auth import auth_router  # noqa: E402
 
 app.include_router(auth_router)
 app.include_router(transcription.router)
+app.include_router(jobs.router)
 app.include_router(analysis.router)
 app.include_router(templates.router)
 app.include_router(exports.router)

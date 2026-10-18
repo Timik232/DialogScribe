@@ -8,13 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from gigaam_transcriber import GigaAMTranscriber
 from gigaam_transcriber.auth import get_current_user
 from gigaam_transcriber.data_models import TranscriptionResult
-from gigaam_transcriber.database import get_db
-from gigaam_transcriber.models import User, UserSettings
+from gigaam_transcriber.database import async_session_factory, get_db
 from gigaam_transcriber.limits import check_limit
+from gigaam_transcriber.models import User, UserSettings
 from gigaam_transcriber.rate_limit import user_rate_limit
 from gigaam_transcriber.usage import track_usage
-from gigaam_transcriber.database import async_session_factory
-
 from routers._helpers import (
     _handle_transcription_exception,
     _map_diarization,

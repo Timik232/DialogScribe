@@ -1,7 +1,17 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from gigaam_transcriber.asr_provider import DEFAULT_ASR_PROVIDER
@@ -133,6 +143,48 @@ class SavedTranscription(Base):
 
 # NOTE: the meeting_prep_plans table (migration 007) has no ORM mapping —
 # meeting-prep results are computed per request and never persisted.
+
+class TranscriptionJob(Base):
+    """Server-side background transcription job (docs/design/background-jobs.md).
+
+    A job owns its input file on a durable volume for the whole processing
+    window: it is created by ``POST /api/jobs``, processed by an asyncio task
+    independent of any client connection, and its result is persisted into
+    ``saved_transcriptions`` on completion. Clients poll ``GET /api/jobs/{id}``
+    — losing the connection (screen off, app killed) no longer loses the work.
+    """
+
+    __tablename__ = "transcription_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="queued", index=True
+    )
+    # free-form stage label for the UI: upload|transcribing|analyzing|done|error|cancelled
+    stage: Mapped[str] = mapped_column(String(32), nullable=False, default="upload")
+    progress: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    params: Mapped[dict] = mapped_column(JSON, nullable=True, default=dict)
+    input_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    input_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    input_size_bytes: Mapped[int | None] = mapped_column(
+        "input_size_bytes", Integer, nullable=True
+    )
+    result: Mapped[dict | None] = mapped_column("result", JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    saved_transcription_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow, onupdate=_utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+
+    user = relationship("User", backref="transcription_jobs")
+
+    # Terminal states — no further transitions allowed from these.
+    TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
 
 class UserSettings(Base):
     __tablename__ = "user_settings"

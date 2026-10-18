@@ -16,18 +16,20 @@ import time
 from asyncio import sleep as asyncio_sleep
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 import routers.autoflow as autoflow_router
 from gigaam_transcriber.autoflow import AutoflowStage, StageEvent
+from tests.test_autoflow_ws import USER_ID, auth_frame, make_app, make_result
 
-from tests.test_autoflow_ws import (
-    USER_ID,
-    auth_frame,
-    make_app,
-    make_result,
-    ws_env,  # noqa: F401  (fixture re-export)
-)
+
+@pytest.fixture()
+def ws_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("WS_AUTH_TIMEOUT_SECONDS", "2")
+    monkeypatch.setenv("WS_MAX_FRAME_BYTES", str(64 * 1024))
+    monkeypatch.setenv("WS_MAX_TOTAL_BYTES", str(256 * 1024))
+    return str(tmp_path)
 
 # TestClient runs the app loop in a background thread; threading primitives
 # are the only safe way to coordinate it with the main test thread.

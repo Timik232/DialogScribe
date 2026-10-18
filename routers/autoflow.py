@@ -14,7 +14,6 @@ from gigaam_transcriber.limits import check_limit
 from gigaam_transcriber.models import SavedTranscription
 from gigaam_transcriber.summarizer import LLMClient, LLMClientConfig
 from gigaam_transcriber.usage import track_usage
-from routers.correlation import get_correlation_id
 from gigaam_transcriber.ws_protocol import (
     WS_PROTOCOL_VERSION,
     BinaryUpload,
@@ -24,6 +23,7 @@ from gigaam_transcriber.ws_protocol import (
     ws_db_session,
 )
 from routers._helpers import SUPPORTED_EXTENSIONS, _map_diarization
+from routers.correlation import get_correlation_id
 
 logger = logging.getLogger("dialogscribe-autoflow")
 router = APIRouter(prefix="/api/autoflow", tags=["autoflow"])
@@ -356,7 +356,7 @@ async def autoflow_ws(ws: WebSocket):
 
     except WebSocketDisconnect:
         logger.info("Autoflow WebSocket disconnected")
-    except Exception as e:
+    except Exception:
         logger.exception(
             "Autoflow WebSocket error (correlation_id=%s)", get_correlation_id()
         )

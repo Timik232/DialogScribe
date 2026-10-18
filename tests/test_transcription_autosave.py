@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import routers.transcription as transcription_router
-from tests.conftest import setup_auth_override, clear_auth_override
+from tests.conftest import setup_auth_override
 
 
 @pytest.fixture(scope="module")
@@ -24,7 +24,6 @@ def client():
         patch("routers.transcription.track_usage"),
     ):
         from api import app
-
         from gigaam_transcriber.database import Base, engine
 
         async def _create_tables():
@@ -114,10 +113,11 @@ class TestAutoPersistence:
 
     def test_schedule_persist_real_insert(self, client):
         """schedule_persist against the real sqlite DB actually writes a row."""
-        from gigaam_transcriber.database import async_session_factory
-        from routers._persistence import schedule_persist
         from sqlalchemy import select
+
+        from gigaam_transcriber.database import async_session_factory
         from gigaam_transcriber.models import SavedTranscription
+        from routers._persistence import schedule_persist
 
         payload = {
             "text": "durable text",
