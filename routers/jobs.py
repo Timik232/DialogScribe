@@ -14,6 +14,7 @@ discoverable by polling or from the history page.
 from __future__ import annotations
 
 import os
+import shutil
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
@@ -104,7 +105,10 @@ async def submit_job(
                 params=params,
             )
             final_path = job_input_path(job.id, filename)
-            os.replace(tmp_path, final_path)
+            # shutil.move, not os.replace: the spool tempfile lives on the
+            # container's overlay fs while the job store is a bind mount —
+            # os.replace fails with EXDEV there (verified on prod).
+            shutil.move(tmp_path, final_path)
     except HTTPException:
         raise
     except OSError as exc:
