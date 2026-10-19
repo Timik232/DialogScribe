@@ -78,7 +78,7 @@ Variable                   Default
 =========================  ======================================
 WS_AUTH_TIMEOUT_SECONDS    10
 WS_MAX_FRAME_BYTES         1048576
-WS_MAX_TOTAL_BYTES         MAX_UPLOAD_SIZE_MB * 1 MiB (default 1024)
+WS_MAX_TOTAL_BYTES         MAX_UPLOAD_SIZE_MB * 1 MiB (default 2048)
 WS_ALLOWED_ORIGINS         (empty; comma-separated extra allowed Origins)
 =========================  ======================================
 
@@ -138,7 +138,7 @@ TAG_FOR_SOURCE = {"mic": 1, "tab": 2}
 
 MAX_TEXT_FRAME_BYTES = 64 * 1024
 DEFAULT_MAX_FRAME_BYTES = 1024 * 1024
-DEFAULT_MAX_TOTAL_BYTES = 1024 * 1024 * 1024
+DEFAULT_MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 
 TERMINAL_TYPES = frozenset({"complete", "error"})
 
@@ -172,7 +172,7 @@ class WsLimits:
 
     @classmethod
     def from_env(cls) -> WsLimits:
-        upload_cap = _env_int("MAX_UPLOAD_SIZE_MB", 1024) * 1024 * 1024
+        upload_cap = _env_int("MAX_UPLOAD_SIZE_MB", 2048) * 1024 * 1024
         return cls(
             auth_timeout_seconds=_env_float("WS_AUTH_TIMEOUT_SECONDS", 10.0),
             max_text_frame_bytes=MAX_TEXT_FRAME_BYTES,
