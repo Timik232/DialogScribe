@@ -8,16 +8,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from gigaam_transcriber import GigaAMTranscriber
 from gigaam_transcriber.auth import get_current_user
 from gigaam_transcriber.data_models import TranscriptionResult
-from gigaam_transcriber.database import get_db
-from gigaam_transcriber.models import User, UserSettings
+from gigaam_transcriber.database import async_session_factory, get_db
 from gigaam_transcriber.limits import check_limit
+from gigaam_transcriber.models import User, UserSettings
 from gigaam_transcriber.rate_limit import user_rate_limit
 from gigaam_transcriber.usage import track_usage
-
 from routers._helpers import (
     _handle_transcription_exception,
     _map_diarization,
+    logger,
 )
+from routers._persistence import schedule_persist
 from routers._uploads import spool_upload
 
 router = APIRouter(prefix="/api", tags=["transcription"])
@@ -34,6 +35,37 @@ def _segment_to_json(segment) -> dict:
     if segment.confidence is not None:
         payload["confidence"] = segment.confidence
     return payload
+
+
+def _finalize(
+    user: User,
+    result: dict,
+    *,
+    origin: str,
+    filename: str | None = None,
+) -> None:
+    """Schedule server-side persistence of a finished transcription.
+
+    The saved-transcriptions row makes the result durable even when the HTTP
+    response is lost (mobile client locked screen, app killed, network
+    drop): the user reopens the app and finds it in the history. Runs on a
+    fresh DB session so it never races the request teardown; failures are
+    logged and swallowed — an already-computed result must still reach a
+    live client.
+    """
+    try:
+        asyncio.ensure_future(
+            schedule_persist(
+                async_session_factory,
+                user.id,
+                result,
+                origin=origin,
+                filename=filename,
+            )
+        )
+    except Exception:
+        logger.exception("Failed to schedule transcription persistence")
+    return None
 
 
 def _transcribe_upload(
@@ -89,6 +121,7 @@ async def transcribe(
     duration_minutes = result.get("duration", 0) / 60
     await track_usage(db, user.id, "transcription_minutes", duration_minutes)
     await track_usage(db, user.id, "file_upload", 1.0)
+    _finalize(user, result, origin="upload", filename=file.filename)
     return result
 
 
@@ -114,4 +147,5 @@ async def transcribe_microphone(
     )
     duration_minutes = result.get("duration", 0) / 60
     await track_usage(db, user.id, "transcription_minutes", duration_minutes)
+    _finalize(user, result, origin="microphone", filename=file.filename)
     return result

@@ -89,8 +89,11 @@ class TestWholeFileChunking:
         result = transcriber.transcribe(audio_file, diarization="none", denoise="none")
 
         assert provider.transcribe.call_count == 3
-        requested_paths = [call.args[0] for call in provider.transcribe.call_args_list]
-        assert requested_paths == [str(path) for path, _s, _e in chunks]
+        # Chunks are dispatched to a bounded ThreadPoolExecutor, so the mock's
+        # call ORDER is scheduler-dependent; only membership and the final
+        # text order (re-assembled from offsets) are contractual.
+        requested_paths = {call.args[0] for call in provider.transcribe.call_args_list}
+        assert requested_paths == {str(path) for path, _s, _e in chunks}
         assert result.text == "кусок кусок кусок"
 
     def test_audio_below_threshold_stays_single_request(self, chunking_transcriber, temp_dir):

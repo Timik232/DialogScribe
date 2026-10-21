@@ -65,9 +65,9 @@ function parseVersioned(raw: string): TranscriptionResult | null {
 }
 
 function loadFromStorage(): TranscriptionResult | null {
-	if (typeof sessionStorage === "undefined") return null;
+	if (typeof localStorage === "undefined") return null;
 	try {
-		const raw = sessionStorage.getItem(STORAGE_KEY);
+		const raw = localStorage.getItem(STORAGE_KEY);
 		return raw ? parseVersioned(raw) : null;
 	} catch {
 		return null;
@@ -75,13 +75,13 @@ function loadFromStorage(): TranscriptionResult | null {
 }
 
 function saveToStorage(value: TranscriptionResult | null): void {
-	if (typeof sessionStorage === "undefined") return;
+	if (typeof localStorage === "undefined") return;
 	try {
 		if (value) {
 			const payload: VersionedPayload = { version: STORAGE_VERSION, data: value };
-			sessionStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+			localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
 		} else {
-			sessionStorage.removeItem(STORAGE_KEY);
+			localStorage.removeItem(STORAGE_KEY);
 		}
 	} catch {
 		/* quota exceeded — ignore */

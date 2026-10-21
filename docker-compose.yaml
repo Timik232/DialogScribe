@@ -24,7 +24,7 @@ services:
       start_period: 10s
 
   dialogscribe-web:
-    image: 192.168.1.47:7002/dialogscribe@sha256:5e7fa4758f7171d7da8bd01b4a3d6e340e33e198b0671596192b462d38e865cb
+    image: 192.168.1.47:7002/dialogscribe@sha256:bc0117aadc00132440bb38f2ba2efc5a1413a29f8fe1dfd4f840421e7d6f30b4
     build:
       context: .
       dockerfile: Dockerfile
@@ -53,7 +53,7 @@ services:
       - JWT_SECRET=${JWT_SECRET:-}
       - API_KEY=${API_KEY:-}
       - V1_API_ENABLED=${V1_API_ENABLED:-false}
-      - MAX_UPLOAD_SIZE_MB=${MAX_UPLOAD_SIZE_MB:-1024}
+      - MAX_UPLOAD_SIZE_MB=${MAX_UPLOAD_SIZE_MB:-2048}
       # 600s keeps a single ASR request ≤19.2MB (16kHz-mono WAV); the ASR backend rejects files >25MiB
       - TRANSCRIPTION_CHUNK_THRESHOLD_SEC=${TRANSCRIPTION_CHUNK_THRESHOLD_SEC:-600}
       - TRANSCRIPTION_CHUNK_DURATION_SEC=${TRANSCRIPTION_CHUNK_DURATION_SEC:-300}

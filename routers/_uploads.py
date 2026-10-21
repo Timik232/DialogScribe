@@ -19,7 +19,7 @@ Single source of truth for the authenticated upload pipeline used by
   live requests.
 
 The limit is read from ``MAX_UPLOAD_SIZE_MB`` at request time so tests
-and deployments can tune it without module reloads. The default (1024)
+and deployments can tune it without module reloads. The default (2048)
 is the single aligned value shared with docker-compose*.yaml, the
 frontend uploader and the README.
 """
@@ -42,7 +42,7 @@ from routers._helpers import SUPPORTED_EXTENSIONS
 
 logger = logging.getLogger("dialogscribe-api")
 
-DEFAULT_MAX_UPLOAD_SIZE_MB = 1024
+DEFAULT_MAX_UPLOAD_SIZE_MB = 2048
 
 # Application-owned tempfile prefixes (startup sweep only ever touches these).
 UPLOAD_TEMP_PREFIX = "ds_up_"
@@ -57,7 +57,7 @@ _BODY_METHODS = frozenset({"POST", "PUT", "PATCH"})
 
 
 def max_upload_mb() -> int:
-    """Current upload limit in MiB (``MAX_UPLOAD_SIZE_MB`` env, default 1024).
+    """Current upload limit in MiB (``MAX_UPLOAD_SIZE_MB`` env, default 2048).
 
     A non-integer value falls back to the default. An integer <= 0 is
     fail-closed: kept as-is so every upload is rejected with 413 rather

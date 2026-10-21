@@ -2,6 +2,7 @@
 	import AudioUploader from '$lib/components/AudioUploader.svelte';
 	import AsrProviderSelect from '$lib/components/AsrProviderSelect.svelte';
 	import { fetchApi, fetchApiBlob } from '$lib/services/api';
+	import { JobPoller, stageLabel, type JobStatus } from '$lib/services/jobs';
 	import {
 		transcriptionStore,
 		type TranscriptionResult,
@@ -41,12 +42,17 @@
 	let editingSpeakerValue = $state('');
 	let saving = $state(false);
 	let saved = $state(false);
+	let activeJobId: string | null = $state(null);
+	let jobStage = $state('');
+	let jobProgress = $state(0);
+	let poller: JobPoller | null = null;
 
 	onMount(() => {
 		if (result === null) {
 			const stored = get(transcriptionStore);
 			if (stored) result = stored;
 		}
+		resumeActiveJobs();
 	});
 
 	function speakerColor(speaker: string | undefined): string {
@@ -80,11 +86,70 @@
 		error = '';
 	}
 
+	function handleJobUpdate(job: JobStatus): void {
+		jobStage = stageLabel(job.stage);
+		jobProgress = job.progress ?? 0;
+		if (job.status === 'completed' && job.result) {
+			const r = job.result;
+			result = {
+				text: r.text,
+				segments: r.segments ?? [],
+				duration: r.duration ?? 0,
+				language: r.language ?? 'ru'
+			};
+			transcriptionStore.set(result);
+			activeJobId = null;
+			loading = false;
+			saved = true;
+		} else if (job.status === 'failed') {
+			error = job.error || 'Ошибка обработки';
+			activeJobId = null;
+			loading = false;
+		} else if (job.status === 'cancelled') {
+			activeJobId = null;
+			loading = false;
+		}
+	}
+
+	function stopPolling(): void {
+		poller?.stop();
+		poller = null;
+	}
+
+	async function resumeActiveJobs(): Promise<void> {
+		// After a reload/screen-off the page picks up any still-running jobs.
+		try {
+			const jobs = await fetchApi<JobStatus[]>('GET', '/api/jobs?active_only=true');
+			const active = (jobs ?? []).find((j) => !['completed', 'failed', 'cancelled'].includes(j.status));
+			if (active) {
+				activeJobId = active.id;
+				loading = true;
+				error = '';
+				startPolling(active.id);
+			}
+		} catch {
+			/* not authenticated or API unavailable — nothing to resume */
+		}
+	}
+
+	function startPolling(jobId: string): void {
+		stopPolling();
+		poller = new JobPoller(jobId, {
+			intervalMs: 2500,
+			onUpdate: handleJobUpdate,
+			onError: () => undefined
+		});
+		poller.start();
+	}
+
 	async function transcribe(): Promise<void> {
 		if (!selectedFile) return;
 		loading = true;
 		error = '';
 		result = null;
+		saved = false;
+		jobStage = 'Загрузка файла';
+		jobProgress = 0;
 
 		try {
 			const formData = new FormData();
@@ -95,17 +160,21 @@
 				formData.append('language', language.trim());
 			}
 
-			const endpoint = '/api/transcribe';
-			const data = await fetchApi<TranscriptionResult>('POST', endpoint, {
-				body: formData
-			});
-
-			result = data;
-			transcriptionStore.set(data);
+			const job = await fetchApi<JobStatus>('POST', '/api/jobs', { body: formData });
+			activeJobId = job.id;
+			startPolling(job.id);
 		} catch (e: any) {
-			error = e?.message || 'Ошибка транскрипции';
-		} finally {
+			error = e?.message || 'Ошибка отправки файла';
 			loading = false;
+		}
+	}
+
+	async function cancelActiveJob(): Promise<void> {
+		if (!activeJobId) return;
+		try {
+			await fetchApi('DELETE', `/api/jobs/${activeJobId}`);
+		} catch {
+			/* the poller will observe the terminal state regardless */
 		}
 	}
 
@@ -285,11 +354,19 @@
 		>
 			{#if loading}
 				<span class="spinner"></span>
-				Транскрибация…
+				{jobStage || 'Транскрибация…'}{jobProgress > 0 ? ` ${Math.round(jobProgress * 100)}%` : ''}
 			{:else}
 				Транскрибировать
 			{/if}
 		</button>
+
+		{#if loading && activeJobId}
+			<div class="job-note">
+				Обработка идёт на сервере — можно закрыть страницу или погасить экран,
+				результат появится в <a href="/transcriptions">истории</a>.
+				<button class="btn btn-link" onclick={cancelActiveJob}>Отменить</button>
+			</div>
+		{/if}
 	</section>
 
 	{#if error}
@@ -455,6 +532,29 @@
 		font-size: 0.8125rem;
 		font-weight: 500;
 		color: var(--color-muted);
+	}
+
+	.job-note {
+		font-size: 0.8125rem;
+		color: var(--color-muted);
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+	}
+
+	.job-note a {
+		color: var(--color-cta);
+	}
+
+	.btn-link {
+		background: none;
+		border: none;
+		padding: 0;
+		color: var(--color-cta);
+		cursor: pointer;
+		font-size: 0.8125rem;
+		text-decoration: underline;
 	}
 
 	.transcribe-btn {

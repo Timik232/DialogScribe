@@ -5,7 +5,7 @@
 		'.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac', '.wma', '.opus',
 		'.mp4', '.mkv', '.avi', '.mov', '.webm', '.wmv', '.flv', '.mpeg', '.mpg'
 	];
-	const MAX_SIZE_MB = 1024;
+	const MAX_SIZE_MB = 2048;
 
 	interface Props {
 		onfile: (file: File) => void;
