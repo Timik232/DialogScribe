@@ -3,6 +3,7 @@
 	import AsrProviderSelect from '$lib/components/AsrProviderSelect.svelte';
 	import { fetchApi, fetchApiBlob } from '$lib/services/api';
 	import { JobPoller, stageLabel, type JobStatus } from '$lib/services/jobs';
+	import { ensureNotificationPermission, notifyJobFinished, resetJobNotification } from '$lib/services/notifications';
 	import {
 		transcriptionStore,
 		type TranscriptionResult,
@@ -86,6 +87,56 @@
 		error = '';
 	}
 
+	// ── Page-wide drag & drop ──
+	let pageRoot: HTMLDivElement | undefined = $state();
+	let pageDragging = $state(false);
+	let dragDepth = 0;
+
+	function isMediaFile(file: File): boolean {
+		return file.type.startsWith('audio/') || file.type.startsWith('video/') || /\.(mp3|wav|m4a|ogg|opus|flac|aac|mp4|webm|mkv|mov|avi)$/i.test(file.name);
+	}
+
+	function onPageDragEnter(e: DragEvent): void {
+		if (!e.dataTransfer?.types.includes('Files')) return;
+		dragDepth++;
+		pageDragging = true;
+	}
+
+	function onPageDragOver(e: DragEvent): void {
+		if (!e.dataTransfer?.types.includes('Files')) return;
+		e.preventDefault();
+	}
+
+	function onPageDragLeave(): void {
+		dragDepth = Math.max(0, dragDepth - 1);
+		if (dragDepth === 0) pageDragging = false;
+	}
+
+	function onPageDrop(e: DragEvent): void {
+		e.preventDefault();
+		e.stopPropagation();
+		dragDepth = 0;
+		pageDragging = false;
+		const file = e.dataTransfer?.files?.[0];
+		if (file && isMediaFile(file)) {
+			onFileSelected(file);
+		}
+	}
+
+	$effect(() => {
+		if (!pageRoot) return;
+		pageRoot.addEventListener('dragenter', onPageDragEnter);
+		pageRoot.addEventListener('dragover', onPageDragOver);
+		pageRoot.addEventListener('dragleave', onPageDragLeave);
+		pageRoot.addEventListener('drop', onPageDrop);
+		return () => {
+			pageRoot.removeEventListener('dragenter', onPageDragEnter);
+			pageRoot.removeEventListener('dragover', onPageDragOver);
+			pageRoot.removeEventListener('dragleave', onPageDragLeave);
+			pageRoot.removeEventListener('drop', onPageDrop);
+		};
+	});
+
 	function handleJobUpdate(job: JobStatus): void {
 		jobStage = stageLabel(job.stage);
 		jobProgress = job.progress ?? 0;
@@ -98,6 +149,7 @@
 				language: r.language ?? 'ru'
 			};
 			transcriptionStore.set(result);
+			notifyJobFinished('completed', job.filename ?? undefined);
 			activeJobId = null;
 			loading = false;
 			saved = true;
@@ -105,6 +157,7 @@
 			error = job.error || 'Ошибка обработки';
 			activeJobId = null;
 			loading = false;
+			notifyJobFinished('failed', job.error || undefined);
 		} else if (job.status === 'cancelled') {
 			activeJobId = null;
 			loading = false;
@@ -150,6 +203,8 @@
 		saved = false;
 		jobStage = 'Загрузка файла';
 		jobProgress = 0;
+		resetJobNotification();
+		ensureNotificationPermission();
 
 		try {
 			const formData = new FormData();
@@ -307,7 +362,15 @@
 	}
 </script>
 
-<div class="container page">
+<div class="container page" bind:this={pageRoot}>
+	{#if pageDragging}
+		<div class="page-drop-overlay">
+			<div class="page-drop-inner">
+				<span class="page-drop-icon">📁</span>
+				<p>Отпустите файл — он будет выбран для транскрипции</p>
+			</div>
+		</div>
+	{/if}
 	<h1>Транскрипция</h1>
 
 	<section class="card upload-section">
@@ -500,7 +563,39 @@
 
 <style>
 	.page {
+		position: relative;
 		padding: 1.5rem 1rem 3rem;
+	}
+
+	.page-drop-overlay {
+		position: absolute;
+		inset: 0;
+		z-index: 50;
+		background: color-mix(in srgb, var(--color-bg) 82%, transparent);
+		backdrop-filter: blur(2px);
+		border: 2px dashed var(--color-cta);
+		border-radius: var(--radius);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		pointer-events: none;
+	}
+
+	.page-drop-inner {
+		text-align: center;
+		color: var(--color-text);
+	}
+
+	.page-drop-icon {
+		font-size: 3rem;
+		display: block;
+		margin-bottom: 0.5rem;
+	}
+
+	.page-drop-inner p {
+		margin: 0;
+		font-size: 0.9375rem;
+		font-weight: 600;
 	}
 
 	.page h1 {

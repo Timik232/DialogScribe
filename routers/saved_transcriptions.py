@@ -248,23 +248,31 @@ async def create_transcription(
 @router.get("/saved-transcriptions")
 async def list_transcriptions(
     q: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
     _user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    stmt = select(SavedTranscription).where(
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    base = select(SavedTranscription).where(
         SavedTranscription.user_id == _user.id,
     )
 
     if q:
-        stmt = stmt.where(
+        base = base.where(
             sa_func.lower(SavedTranscription.title).like(f"%{q.lower()}%")
             | sa_func.lower(SavedTranscription.full_text).like(f"%{q.lower()}%")
         )
 
-    stmt = stmt.order_by(SavedTranscription.created_at.desc())
+    count_stmt = select(sa_func.count()).select_from(base.subquery())
+    total = (await db.execute(count_stmt)).scalar_one()
+
+    stmt = base.order_by(SavedTranscription.created_at.desc()).limit(limit).offset(offset)
     result = await db.execute(stmt)
     rows = result.scalars().all()
-    return [_to_list_item(t) for t in rows]
+    items = [_to_list_item(t) for t in rows]
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
 @router.get("/saved-transcriptions/{transcription_id}")

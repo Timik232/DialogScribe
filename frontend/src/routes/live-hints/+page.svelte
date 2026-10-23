@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { authStore } from '$lib/stores/auth';
+	import { fetchApi } from '$lib/services/api';
 	import { LiveHintsClient } from '$lib/services/live-hints-api';
 	import LiveAudioCapture from '$lib/components/LiveAudioCapture.svelte';
 	import TranscriptView from '$lib/components/TranscriptView.svelte';
@@ -20,6 +21,11 @@
 	let errorMessage = $state('');
 	let errorTimer: ReturnType<typeof setTimeout> | undefined;
 	let backpressure = $state({ dropped: 0, invalid: 0, recv: 0, process: 0, recvCap: 0, processCap: 0 });
+	let copyState = $state<'idle' | 'ok'>('idle');
+	let saveState = $state<'idle' | 'saving' | 'saved' | 'error'>('idle');
+	let recordingPaused = $state(false);
+	let sessionSeconds = $state(0);
+	let sessionTimer: ReturnType<typeof setInterval> | undefined;
 
 	const backpressureActive = $derived(
 		backpressure.dropped > 0 ||
@@ -27,6 +33,63 @@
 			(backpressure.recvCap > 0 && backpressure.recv / backpressure.recvCap >= 0.8) ||
 			(backpressure.processCap > 0 && backpressure.process / backpressure.processCap >= 0.8)
 	);
+
+	const totalWords = $derived(
+		transcriptSegments.reduce((acc, s) => acc + s.text.trim().split(/\s+/).filter(Boolean).length, 0)
+	);
+	const wordsPerMinute = $derived(
+		sessionSeconds > 0 ? Math.round((totalWords / sessionSeconds) * 60) : 0
+	);
+
+	function formatSessionDuration(total: number): string {
+		const h = Math.floor(total / 3600);
+		const m = Math.floor((total % 3600) / 60);
+		const s = total % 60;
+		const mm = String(m).padStart(2, '0');
+		const ss = String(s).padStart(2, '0');
+		return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+	}
+
+	function fullTranscriptText(): string {
+		return transcriptSegments.map((s) => `[${s.speaker}] ${s.text}`).join('\n');
+	}
+
+	async function copyTranscript(): Promise<void> {
+		const text = fullTranscriptText();
+		if (!text) return;
+		try {
+			await navigator.clipboard.writeText(text);
+			copyState = 'ok';
+			setTimeout(() => (copyState = 'idle'), 2000);
+		} catch {
+			/* clipboard unavailable */
+		}
+	}
+
+	async function saveTranscript(): Promise<void> {
+		if (saveState === 'saving' || transcriptSegments.length === 0) return;
+		saveState = 'saving';
+		try {
+			await fetchApi('POST', '/api/saved-transcriptions', {
+				title: `Live ${new Date().toLocaleString('ru-RU')}`,
+				full_text: transcriptSegments.map((s) => `${s.speaker}: ${s.text}`).join('\n'),
+				segments: transcriptSegments,
+				speaker_names: {},
+				duration: sessionSeconds,
+				language: 'ru'
+			});
+			saveState = 'saved';
+			setTimeout(() => (saveState = 'idle'), 3000);
+		} catch (e) {
+			console.error('Failed to save transcript:', e);
+			saveState = 'error';
+			setTimeout(() => (saveState = 'idle'), 3000);
+		}
+	}
+
+	function togglePause(): void {
+		recordingPaused = !recordingPaused;
+	}
 
 	$effect(() => {
 		transcriptSegments;
@@ -44,8 +107,10 @@
 				wsClient.disconnect();
 				wsClient = null;
 			}
+			if (sessionTimer) clearInterval(sessionTimer);
 			sessionActive = false;
 			wsConnected = false;
+			recordingPaused = false;
 			if (errorTimer) clearTimeout(errorTimer);
 		};
 	});
@@ -112,6 +177,11 @@
 
 			wsClient = client;
 			sessionActive = true;
+			recordingPaused = false;
+			sessionSeconds = 0;
+			sessionTimer = setInterval(() => {
+				if (!recordingPaused) sessionSeconds++;
+			}, 1000);
 		} catch (err) {
 			console.error('Failed to start session:', err);
 			sessionStatus = 'error';
@@ -124,8 +194,13 @@
 			wsClient.disconnect();
 			wsClient = null;
 		}
+		if (sessionTimer) {
+			clearInterval(sessionTimer);
+			sessionTimer = undefined;
+		}
 		sessionActive = false;
 		wsConnected = false;
+		recordingPaused = false;
 		sessionStatus = 'idle';
 		errorMessage = '';
 		if (errorTimer) clearTimeout(errorTimer);
@@ -140,10 +215,26 @@
 	}
 
 	function handleAudioChunk(audio: ArrayBuffer, source: 'mic' | 'tab'): void {
-		if (wsClient) {
+		if (wsClient && !recordingPaused) {
 			wsClient.sendAudioChunk(audio, source);
 		}
 	}
+
+	function handleKeydown(e: KeyboardEvent): void {
+		if (e.target instanceof HTMLElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
+		if (e.code === 'Space' && sessionActive) {
+			e.preventDefault();
+			togglePause();
+		} else if (e.code === 'Escape' && sessionActive && !recordingPaused) {
+			e.preventDefault();
+			stopSession();
+		}
+	}
+
+	$effect(() => {
+		window.addEventListener('keydown', handleKeydown);
+		return () => window.removeEventListener('keydown', handleKeydown);
+	});
 </script>
 
 <div class="live-mode-page">
@@ -176,6 +267,14 @@
 						⚠ {backpressure.dropped > 0 ? `отброшено: ${backpressure.dropped}` : 'очередь на пределе'}
 					</span>
 				{/if}
+				{#if sessionActive}
+					<span class="status-badge" class:paused={recordingPaused}>⏱ {formatSessionDuration(sessionSeconds)}</span>
+					<span class="status-badge">💬 {transcriptSegments.length}</span>
+					<span class="status-badge">📝 {totalWords} слов · {wordsPerMinute} сл/мин</span>
+					<button class="btn btn-secondary btn-pause" onclick={togglePause} title="Space">
+						{recordingPaused ? '▶ Продолжить' : '⏸ Пауза'}
+					</button>
+				{/if}
 				<button
 					class="btn btn-primary session-btn"
 					onclick={toggleSession}
@@ -201,7 +300,24 @@
 
 	<div class="session-content">
 		<section class="column transcript-column">
-			<h2 class="column-title">Транскрипция</h2>
+			<div class="column-head">
+				<h2 class="column-title">Транскрипция</h2>
+				{#if transcriptSegments.length > 0}
+					<div class="transcript-actions">
+						<button class="btn btn-secondary btn-sm" onclick={copyTranscript} disabled={copyState === 'ok'}>
+							{copyState === 'ok' ? '✓ Скопировано' : '⧉ Копировать'}
+						</button>
+						<button
+							class="btn btn-secondary btn-sm"
+							onclick={saveTranscript}
+							disabled={saveState === 'saving' || saveState === 'saved'}
+							title="Сохранить текст в Расшифровки (аудио не сохраняется)"
+						>
+							{saveState === 'saving' ? 'Сохранение…' : saveState === 'saved' ? '✓ Сохранено' : saveState === 'error' ? '✗ Ошибка' : '💾 В Расшифровки'}
+						</button>
+					</div>
+				{/if}
+			</div>
 			<SpeakingStatsBar segments={transcriptSegments} />
 			<div class="column-body" bind:this={transcriptContainer}>
 				{#if transcriptSegments.length === 0}
@@ -345,6 +461,33 @@
 		font-weight: 600;
 		color: var(--color-text);
 		flex-shrink: 0;
+	}
+
+	.column-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.75rem;
+		flex-wrap: wrap;
+		margin-bottom: 0.75rem;
+	}
+
+	.column-head .column-title {
+		margin: 0;
+	}
+
+	.transcript-actions {
+		display: flex;
+		gap: 0.5rem;
+	}
+
+	.btn-pause {
+		height: 42px;
+		white-space: nowrap;
+	}
+
+	.status-badge.paused {
+		opacity: 0.6;
 	}
 
 	.column-body {

@@ -35,6 +35,8 @@
 
 	let transcriptions: TranscriptionListItem[] = $state([]);
 	let loading = $state(true);
+	let loadingMore = $state(false);
+	let totalCount = $state(0);
 	let searchQuery = $state('');
 	let searchTimeout: ReturnType<typeof setTimeout> | null = null;
 
@@ -66,21 +68,49 @@
 		};
 	});
 
-	async function loadTranscriptions(query?: string) {
-		loading = true;
+	const PAGE_SIZE = 50;
+
+	async function loadTranscriptions(query?: string, append = false) {
+		if (append) {
+			loadingMore = true;
+		} else {
+			loading = true;
+		}
 		try {
-			const path = query
-				? `/api/saved-transcriptions?q=${encodeURIComponent(query)}`
-				: '/api/saved-transcriptions';
-			const data = await fetchApi<TranscriptionListItem[]>('GET', path);
-			transcriptions = Array.isArray(data) ? data : [];
+			const params = new URLSearchParams();
+			if (query) params.set('q', query);
+			if (append) params.set('offset', String(transcriptions.length));
+			params.set('limit', String(PAGE_SIZE));
+			const data = await fetchApi<{ items: TranscriptionListItem[]; total: number } | TranscriptionListItem[]>(
+				'GET',
+				`/api/saved-transcriptions?${params.toString()}`
+			);
+			if (Array.isArray(data)) {
+				// старый бэкенд без обёртки
+				transcriptions = append ? [...transcriptions, ...data] : data;
+				totalCount = data.length;
+			} else if (data && Array.isArray(data.items)) {
+				transcriptions = append ? [...transcriptions, ...data.items] : data.items;
+				totalCount = data.total ?? data.items.length;
+			} else {
+				if (!append) transcriptions = [];
+				totalCount = append ? totalCount : 0;
+			}
 		} catch (e) {
 			console.error('Failed to load transcriptions:', e);
-			transcriptions = [];
+			if (!append) transcriptions = [];
 		} finally {
 			loading = false;
+			loadingMore = false;
 		}
 	}
+
+	function loadMore(): void {
+		if (loadingMore || transcriptions.length >= totalCount) return;
+		loadTranscriptions(searchQuery || undefined, true);
+	}
+
+	const hasMore = $derived(transcriptions.length < totalCount);
 
 	function onSearchInput() {
 		if (searchTimeout) clearTimeout(searchTimeout);
@@ -357,14 +387,27 @@
 	</div>
 
 	{#if loading}
-		<div class="empty">Загрузка…</div>
+		<div class="grid" aria-busy="true">
+			{#each Array(6) as _}
+				<div class="card transcription-card skeleton-card">
+					<div class="skeleton skeleton-title"></div>
+					<div class="card-meta">
+						<div class="skeleton skeleton-badge"></div>
+						<div class="skeleton skeleton-badge"></div>
+						<div class="skeleton skeleton-badge short"></div>
+					</div>
+				</div>
+			{/each}
+		</div>
 	{:else if transcriptions.length === 0}
 		<div class="empty-state">
 			{#if searchQuery}
-				<p>Ничего не найдено</p>
+				<p>Ничего не найдено по «{searchQuery}»</p>
+				<button class="btn btn-secondary" onclick={() => { searchQuery = ''; loadTranscriptions(); }}>Сбросить поиск</button>
 			{:else}
 				<p>Нет сохранённых расшифровок</p>
-				<a href="/transcribe" class="btn btn-primary">Создать расшифровку</a>
+				<a href="/transcribe" class="btn btn-primary">Загрузить файл</a>
+				<a href="/live-hints" class="btn btn-secondary">Записать в Live Режиме</a>
 			{/if}
 		</div>
 	{:else}
@@ -380,6 +423,16 @@
 				</div>
 			{/each}
 		</div>
+		{#if hasMore}
+			<div class="load-more">
+				<button class="btn btn-secondary" onclick={loadMore} disabled={loadingMore}>
+					{loadingMore ? 'Загрузка…' : 'Загрузить ещё'}
+				</button>
+			</div>
+		{/if}
+		{#if totalCount > 0}
+			<div class="list-counter">Показано {transcriptions.length} из {totalCount}</div>
+		{/if}
 	{/if}
 
 	{#if selectedId}
@@ -636,6 +689,58 @@
 		color: var(--color-muted);
 		font-size: 0.9375rem;
 		margin: 0;
+	}
+
+	.load-more {
+		display: flex;
+		justify-content: center;
+		margin-top: 1rem;
+	}
+
+	.list-counter {
+		margin-top: 0.75rem;
+		text-align: center;
+		font-size: 0.8125rem;
+		color: var(--color-muted);
+	}
+
+	/* ── Skeleton loaders ── */
+
+	.skeleton-card {
+		pointer-events: none;
+	}
+
+	.skeleton {
+		background: linear-gradient(90deg, var(--color-border) 25%, var(--color-bg) 50%, var(--color-border) 75%);
+		background-size: 200% 100%;
+		animation: shimmer 1.4s ease-in-out infinite;
+		border-radius: var(--radius-sm);
+	}
+
+	.skeleton-title {
+		height: 1.25rem;
+		width: 70%;
+		margin-bottom: 0.75rem;
+	}
+
+	.skeleton-badge {
+		height: 1.5rem;
+		width: 5.5rem;
+		border-radius: 999px;
+	}
+
+	.skeleton-badge.short {
+		width: 2.5rem;
+	}
+
+	@keyframes shimmer {
+		0%,
+		100% {
+			background-position: 200% 0;
+		}
+		50% {
+			background-position: -200% 0;
+		}
 	}
 
 	/* Overlay */

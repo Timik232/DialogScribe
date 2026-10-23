@@ -102,7 +102,8 @@ class TestJobsApi:
 
         # auto-saved into history
         saved = c.get("/api/saved-transcriptions").json()
-        assert any(item["id"] == final["saved_transcription_id"] for item in saved)
+        items = saved["items"] if isinstance(saved, dict) else saved
+        assert any(item["id"] == final["saved_transcription_id"] for item in items)
 
 
     def test_input_file_lands_in_store_and_is_removed(self, client, job_env):
