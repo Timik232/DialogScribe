@@ -13,6 +13,12 @@ export function getLiveHintsWsUrl(): string {
 
 const SOURCE_TAGS: Record<'mic' | 'tab', number> = { mic: 1, tab: 2 };
 
+export interface LiveTranscriptSegment {
+	text: string;
+	speaker: 'user' | 'opponent';
+	timestamp: number;
+}
+
 export class LiveHintsClient {
 	private ws: WebSocket | null = null;
 	private reconnectAttempts = 0;
@@ -20,7 +26,7 @@ export class LiveHintsClient {
 	private lastConfig?: { templateKey: string; contextText: string; hintsEnabled?: boolean };
 	private lastBrief?: { goal?: string; offering?: string; red_lines?: string; known_objections?: string };
 
-	onTranscript: (segment: Record<string, unknown>) => void = () => {};
+	onTranscript: (segment: LiveTranscriptSegment) => void = () => {};
 	onHints: (hints: Record<string, unknown>[]) => void = () => {};
 	onError: (error: Record<string, unknown>) => void = () => {};
 	onStatus: (status: Record<string, unknown>) => void = () => {};

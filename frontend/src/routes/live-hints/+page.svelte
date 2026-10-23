@@ -1,18 +1,12 @@
 <script lang="ts">
 	import { authStore } from '$lib/stores/auth';
 	import { fetchApi } from '$lib/services/api';
-	import { LiveHintsClient } from '$lib/services/live-hints-api';
+	import { LiveHintsClient, type LiveTranscriptSegment } from '$lib/services/live-hints-api';
 	import LiveAudioCapture from '$lib/components/LiveAudioCapture.svelte';
 	import TranscriptView from '$lib/components/TranscriptView.svelte';
 	import SpeakingStatsBar from '$lib/components/SpeakingStatsBar.svelte';
 
-	interface TranscriptSegment {
-		text: string;
-		speaker: string;
-		timestamp: number;
-	}
-
-	let transcriptSegments: TranscriptSegment[] = $state([]);
+	let transcriptSegments: LiveTranscriptSegment[] = $state([]);
 	let sessionActive = $state(false);
 	let wsConnected = $state(false);
 	let sessionStatus: 'idle' | 'connecting' | 'active' | 'error' | 'reconnecting' | 'connection_lost' = $state('idle');
@@ -71,12 +65,15 @@
 		saveState = 'saving';
 		try {
 			await fetchApi('POST', '/api/saved-transcriptions', {
-				title: `Live ${new Date().toLocaleString('ru-RU')}`,
-				full_text: transcriptSegments.map((s) => `${s.speaker}: ${s.text}`).join('\n'),
-				segments: transcriptSegments,
-				speaker_names: {},
-				duration: sessionSeconds,
-				language: 'ru'
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					title: `Live ${new Date().toLocaleString('ru-RU')}`,
+					full_text: transcriptSegments.map((s) => `${s.speaker}: ${s.text}`).join('\n'),
+					segments: transcriptSegments,
+					speaker_names: {},
+					duration: sessionSeconds,
+					language: 'ru'
+				})
 			});
 			saveState = 'saved';
 			setTimeout(() => (saveState = 'idle'), 3000);
@@ -129,7 +126,7 @@
 			const client = new LiveHintsClient();
 
 			client.onTranscript = (segment) => {
-				transcriptSegments = [...transcriptSegments, segment as TranscriptSegment];
+				transcriptSegments = [...transcriptSegments, segment];
 			};
 
 			client.onError = (error) => {

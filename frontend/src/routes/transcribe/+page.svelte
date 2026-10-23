@@ -124,16 +124,17 @@
 	}
 
 	$effect(() => {
-		if (!pageRoot) return;
-		pageRoot.addEventListener('dragenter', onPageDragEnter);
-		pageRoot.addEventListener('dragover', onPageDragOver);
-		pageRoot.addEventListener('dragleave', onPageDragLeave);
-		pageRoot.addEventListener('drop', onPageDrop);
+		const root = pageRoot;
+		if (!root) return;
+		root.addEventListener('dragenter', onPageDragEnter);
+		root.addEventListener('dragover', onPageDragOver);
+		root.addEventListener('dragleave', onPageDragLeave);
+		root.addEventListener('drop', onPageDrop);
 		return () => {
-			pageRoot.removeEventListener('dragenter', onPageDragEnter);
-			pageRoot.removeEventListener('dragover', onPageDragOver);
-			pageRoot.removeEventListener('dragleave', onPageDragLeave);
-			pageRoot.removeEventListener('drop', onPageDrop);
+			root.removeEventListener('dragenter', onPageDragEnter);
+			root.removeEventListener('dragover', onPageDragOver);
+			root.removeEventListener('dragleave', onPageDragLeave);
+			root.removeEventListener('drop', onPageDrop);
 		};
 	});
 
