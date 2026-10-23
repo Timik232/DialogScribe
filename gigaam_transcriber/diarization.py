@@ -106,6 +106,14 @@ def release_diarization_models() -> List[CacheKey]:
 class DiarizationManager:
     """Менеджер диаризации спикеров."""
     
+    # fp16-автокаст для GPU-инференса: −37% peak VRAM, −29% времени
+    # (бенчмарк 2026-10-23, 5.5-мин аудио: 11.9с → 8.5с, 1629→1019 МБ).
+    # Веса остаются fp32 — batch_norm-слои pyannote не переносят каст весов.
+    # Выход диаризации чувствителен к точности: на тест-файле fp32 даёт 5
+    # спикеров, autocast — 2; включается опционально через env
+    # DIARIZATION_FP16 (значения 1/true/yes), по умолчанию выключен.
+    FP16_ENV = "DIARIZATION_FP16"
+
     def __init__(
         self,
         hf_token: Optional[str] = None,
@@ -137,6 +145,16 @@ class DiarizationManager:
         return _model_cache.make_key(
             "pyannote", PYANNOTE_PIPELINE_REVISION, self.device, self.dtype
         )
+    
+    def _fp16_autocast_enabled(self) -> bool:
+        """Включён ли fp16-автокаст для GPU-инференса (env DIARIZATION_FP16).
+
+        Применяется только на CUDA: на CPU autocast бесполезен и может
+        замедлить выполнение.
+        """
+        if self.device != "cuda":
+            return False
+        return os.getenv(self.FP16_ENV, "").strip().lower() in {"1", "true", "yes"}
     
     def _resolve_device(self, device: str) -> str:
         """Определение устройства."""
@@ -333,7 +351,12 @@ class DiarizationManager:
             with _model_cache.inference_lock(self._cache_key()):
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
-                    diarization = pipeline(str(audio_path), **kwargs)
+                    if self._fp16_autocast_enabled():
+                        import torch
+                        with torch.autocast("cuda", dtype=torch.float16):
+                            diarization = pipeline(str(audio_path), **kwargs)
+                    else:
+                        diarization = pipeline(str(audio_path), **kwargs)
             
             # Преобразование результатов
             segments = []
