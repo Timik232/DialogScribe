@@ -1,32 +1,20 @@
 <script lang="ts">
 	import { authStore } from '$lib/stores/auth';
-	import { fetchApi } from '$lib/services/api';
 	import { LiveHintsClient } from '$lib/services/live-hints-api';
 	import LiveAudioCapture from '$lib/components/LiveAudioCapture.svelte';
-	import MeetingBriefForm from '$lib/components/MeetingBriefForm.svelte';
-	import HintPanel from '$lib/components/HintPanel.svelte';
 	import TranscriptView from '$lib/components/TranscriptView.svelte';
 	import SpeakingStatsBar from '$lib/components/SpeakingStatsBar.svelte';
 
-	interface Template {
-		slug: string;
-		label: string;
+	interface TranscriptSegment {
+		text: string;
+		speaker: string;
+		timestamp: number;
 	}
 
-	let templates: Template[] = $state([]);
-	let selectedTemplate = $state('');
-	let meetingBrief = $state({ goal: 'initial', offering: '', red_lines: '', known_objections: '' });
+	let transcriptSegments: TranscriptSegment[] = $state([]);
 	let sessionActive = $state(false);
 	let wsConnected = $state(false);
 	let sessionStatus: 'idle' | 'connecting' | 'active' | 'error' | 'reconnecting' | 'connection_lost' = $state('idle');
-	let transcriptSegments: Array<{ text: string; speaker: string; timestamp: number }> = $state([]);
-	let hints: Array<{
-		hint_type: 'argumentative' | 'navigational' | 'tactical' | 'strategic' | 'warning' | 'analytical';
-		text: string;
-		priority: 'critical' | 'high' | 'medium' | 'low';
-		hint_id?: string;
-		rationale?: string;
-	}> = $state([]);
 	let wsClient: LiveHintsClient | null = $state(null);
 	let transcriptContainer: HTMLDivElement | undefined = $state();
 	let errorMessage = $state('');
@@ -39,21 +27,6 @@
 			(backpressure.recvCap > 0 && backpressure.recv / backpressure.recvCap >= 0.8) ||
 			(backpressure.processCap > 0 && backpressure.process / backpressure.processCap >= 0.8)
 	);
-
-	$effect(() => {
-		loadTemplates();
-	});
-
-	async function loadTemplates(): Promise<void> {
-		try {
-			templates = await fetchApi<Template[]>('GET', '/api/live-hints/templates');
-			if (templates.length > 0 && !selectedTemplate) {
-				selectedTemplate = templates[0].slug;
-			}
-		} catch {
-			templates = [];
-		}
-	}
 
 	$effect(() => {
 		transcriptSegments;
@@ -85,20 +58,17 @@
 
 	async function startSession(): Promise<void> {
 		sessionStatus = 'connecting';
+		errorMessage = '';
 		try {
 			const token = getToken();
 			const client = new LiveHintsClient();
 
 			client.onTranscript = (segment) => {
-				transcriptSegments = [...transcriptSegments, segment];
-			};
-
-			client.onHints = (newHints) => {
-				hints = [...hints, ...newHints];
+				transcriptSegments = [...transcriptSegments, segment as TranscriptSegment];
 			};
 
 			client.onError = (error) => {
-				console.error('Live hints error:', error);
+				console.error('Live mode error:', error);
 				errorMessage = String(error.message || 'Произошла ошибка');
 				sessionStatus = 'error';
 				if (errorTimer) clearTimeout(errorTimer);
@@ -107,25 +77,25 @@
 				}, 5000);
 			};
 
-		client.onStatus = (data) => {
-			const status = data.status;
-			if (status === 'ready') {
-				sessionStatus = 'active';
-				wsConnected = true;
-			}
-			const queues = data.queues as { recv?: number; process?: number } | undefined;
-			if (queues) {
-				const caps = (data.caps ?? {}) as { recv_queue?: number; process_queue?: number };
-				backpressure = {
-					dropped: Number(data.dropped ?? 0),
-					invalid: Number(data.invalid_chunks ?? 0),
-					recv: Number(queues.recv ?? 0),
-					process: Number(queues.process ?? 0),
-					recvCap: Number(caps.recv_queue ?? 0),
-					processCap: Number(caps.process_queue ?? 0)
-				};
-			}
-		};
+			client.onStatus = (data) => {
+				const status = data.status;
+				if (status === 'ready') {
+					sessionStatus = 'active';
+					wsConnected = true;
+				}
+				const queues = data.queues as { recv?: number; process?: number } | undefined;
+				if (queues) {
+					const caps = (data.caps ?? {}) as { recv_queue?: number; process_queue?: number };
+					backpressure = {
+						dropped: Number(data.dropped ?? 0),
+						invalid: Number(data.invalid_chunks ?? 0),
+						recv: Number(queues.recv ?? 0),
+						process: Number(queues.process ?? 0),
+						recvCap: Number(caps.recv_queue ?? 0),
+						processCap: Number(caps.process_queue ?? 0)
+					};
+				}
+			};
 
 			client.onReconnecting = () => {
 				sessionStatus = 'reconnecting';
@@ -137,14 +107,15 @@
 			};
 
 			await client.connect(token);
-			client.sendConfig(selectedTemplate, '');
-			client.sendBriefUpdate(meetingBrief);
+			// Live-режим: транскрипция без генерации подсказок
+			client.sendConfig('meeting', '', false);
 
 			wsClient = client;
 			sessionActive = true;
 		} catch (err) {
 			console.error('Failed to start session:', err);
 			sessionStatus = 'error';
+			errorMessage = 'Не удалось подключиться';
 		}
 	}
 
@@ -173,44 +144,14 @@
 			wsClient.sendAudioChunk(audio, source);
 		}
 	}
-
-	function handleHintFeedback(hintId: string, rating: 'like' | 'dislike'): void {
-		if (wsClient) {
-			wsClient.sendHintFeedback(hintId, rating);
-		}
-	}
-
-	function handleBriefSubmit(brief: { goal: string; offering: string; red_lines: string; known_objections: string }): void {
-		meetingBrief = brief;
-		if (wsClient && sessionActive) {
-			wsClient.sendBriefUpdate(brief);
-		}
-	}
 </script>
 
-<div class="live-hints-page">
+<div class="live-mode-page">
 	<header class="session-header">
-		<h1>Живые подсказки</h1>
+		<h1>Live Режим</h1>
+		<p class="page-subtitle">Транскрипция в реальном времени — микрофон или звук устройства, без выбора режима</p>
 
 		<div class="header-controls">
-			<div class="field">
-				<label for="template-select">Шаблон</label>
-				<select id="template-select" class="input" bind:value={selectedTemplate} disabled={sessionActive}>
-					{#if templates.length === 0}
-						<option value="" disabled>Загрузка…</option>
-					{:else}
-						{#each templates as t}
-							<option value={t.slug}>{t.label}</option>
-						{/each}
-					{/if}
-				</select>
-			</div>
-
-			<div class="field context-field">
-				<label>Контекст встречи</label>
-				<MeetingBriefForm disabled={sessionActive} onsubmit={handleBriefSubmit} />
-			</div>
-
 			<div class="session-actions">
 				<span class="status-badge" class:connected={wsConnected} class:error={sessionStatus === 'error'} class:reconnecting={sessionStatus === 'reconnecting'} class:connection-lost={sessionStatus === 'connection_lost'}>
 					{#if sessionStatus === 'idle'}
@@ -273,25 +214,11 @@
 				{/if}
 			</div>
 		</section>
-
-		<section class="column hints-column">
-			<h2 class="column-title">Подсказки</h2>
-			<div class="column-body">
-				{#if hints.length === 0}
-					<div class="empty-state">
-						<span class="empty-icon">💡</span>
-						<p>Подсказки появятся во время активной сессии</p>
-					</div>
-				{:else}
-					<HintPanel {hints} onhintfeedback={handleHintFeedback} />
-				{/if}
-			</div>
-		</section>
 	</div>
 </div>
 
 <style>
-	.live-hints-page {
+	.live-mode-page {
 		min-height: calc(100vh - var(--header-height) - 2rem);
 		padding: 1.5rem 1rem 3rem;
 		display: flex;
@@ -302,7 +229,13 @@
 	/* ── Header ── */
 
 	.session-header h1 {
+		margin: 0 0 0.25rem;
+	}
+
+	.page-subtitle {
 		margin: 0 0 1rem;
+		font-size: 0.875rem;
+		color: var(--color-muted);
 	}
 
 	.header-controls {
@@ -313,30 +246,11 @@
 		margin-bottom: 0.5rem;
 	}
 
-	.field {
-		display: flex;
-		flex-direction: column;
-		gap: 0.375rem;
-		flex: 1;
-		min-width: 180px;
-	}
-
-	.field label {
-		font-size: 0.8125rem;
-		font-weight: 500;
-		color: var(--color-muted);
-	}
-
-	.context-field {
-		flex: 2;
-	}
-
 	.session-actions {
 		display: flex;
-		align-items: flex-end;
+		align-items: center;
 		gap: 0.75rem;
-		align-self: flex-start;
-		padding-top: 1.375rem;
+		flex-wrap: wrap;
 	}
 
 	.status-badge {
@@ -405,11 +319,11 @@
 		filter: brightness(1.1);
 	}
 
-	/* ── Two-column layout ── */
+	/* ── Single-column layout ── */
 
 	.session-content {
-		display: grid;
-		grid-template-columns: 1fr 400px;
+		display: flex;
+		flex-direction: column;
 		gap: 1rem;
 		flex: 1;
 		min-height: 0;
@@ -463,21 +377,5 @@
 		font-size: 0.875rem;
 		max-width: 260px;
 		line-height: 1.5;
-	}
-
-	/* ── Responsive ── */
-
-	@media (max-width: 768px) {
-		.session-content {
-			grid-template-columns: 1fr;
-		}
-
-		.header-controls {
-			flex-direction: column;
-		}
-
-		.session-actions {
-			padding-top: 0;
-		}
 	}
 </style>

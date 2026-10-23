@@ -37,6 +37,8 @@ class SessionConfigMessage(BaseModel):
     Поля:
         template_key: Ключ шаблона подсказок.
         context_text: Дополнительный контекст сессии (необязательный).
+        hints_enabled: Генерировать ли подсказки (Live-режим транскрипции
+            без подсказок — по выбору пользователя; по умолчанию включены).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -44,6 +46,7 @@ class SessionConfigMessage(BaseModel):
     type: Literal["session_config"] = "session_config"
     template_key: str
     context_text: str = ""
+    hints_enabled: bool = True
 
 
 # ─── Клиент → Сервер (Live Advisor) ─────────────────────────────
