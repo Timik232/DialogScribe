@@ -17,7 +17,7 @@ export class LiveHintsClient {
 	private ws: WebSocket | null = null;
 	private reconnectAttempts = 0;
 	private maxReconnectAttempts = 3;
-	private lastConfig?: { templateKey: string; contextText: string };
+	private lastConfig?: { templateKey: string; contextText: string; hintsEnabled?: boolean };
 	private lastBrief?: { goal?: string; offering?: string; red_lines?: string; known_objections?: string };
 
 	onTranscript: (segment: Record<string, unknown>) => void = () => {};
@@ -99,13 +99,14 @@ export class LiveHintsClient {
 		});
 	}
 
-	sendConfig(templateKey: string, contextText: string): void {
-		this.lastConfig = { templateKey, contextText };
+	sendConfig(templateKey: string, contextText: string, hintsEnabled = true): void {
+		this.lastConfig = { templateKey, contextText, hintsEnabled };
 		this.ws?.send(
 			JSON.stringify({
 				type: "session_config",
 				template_key: templateKey,
 				context_text: contextText,
+				hints_enabled: hintsEnabled,
 			}),
 		);
 	}
@@ -160,7 +161,7 @@ export class LiveHintsClient {
 			const token = getAccessToken();
 			if (token) {
 				this.connect(token).then(() => {
-					if (this.lastConfig) this.sendConfig(this.lastConfig.templateKey, this.lastConfig.contextText);
+					if (this.lastConfig) this.sendConfig(this.lastConfig.templateKey, this.lastConfig.contextText, this.lastConfig.hintsEnabled ?? true);
 					if (this.lastBrief) this.sendBriefUpdate(this.lastBrief);
 				}).catch(() => {
 					this.onError({ message: "Reconnection failed" });

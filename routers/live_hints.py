@@ -340,6 +340,12 @@ class _LiveHintsSession:
         await self._maybe_generate_hints(now, clean_text)
 
     async def _maybe_generate_hints(self, now: float, clean_text: str) -> None:
+        hints_on = bool(
+            self._session_config and self._session_config.get("hints_enabled", True)
+        )
+        if not hints_on:
+            return
+
         pause_event = self._event_detector.check_pause(now)
         keyword_events = self._event_detector.process_transcript_chunk(clean_text)
         timer_fired = self._event_detector.should_trigger_timer(now)
@@ -405,6 +411,7 @@ class _LiveHintsSession:
                 self._session_config = {
                     "template_key": cfg.template_key,
                     "context_text": cfg.context_text,
+                    "hints_enabled": cfg.hints_enabled,
                 }
                 await self._channel.send(
                     StatusMessage(status="ready").model_dump()

@@ -29,7 +29,7 @@
 			<a href="/templates" class="nav-link">Шаблоны</a>
 			<a href="/transcriptions" class="nav-link">Расшифровки</a>
 			<a href="/docs" class="nav-link">Документация</a>
-			<a href="/live-hints" class="nav-link">Подсказки</a>
+			<a href="/live-hints" class="nav-link">Live Режим</a>
 			<a href="/meeting-prep" class="nav-link">Подготовка</a>
 			{#if $authStore.user?.role === 'admin'}
 				<a href="/admin" class="nav-link">Админ</a>
@@ -56,7 +56,7 @@
 		<a href="/templates" class="mobile-link" onclick={() => menuOpen = false}>Шаблоны</a>
 		<a href="/transcriptions" class="mobile-link" onclick={() => menuOpen = false}>Расшифровки</a>
 		<a href="/docs" class="mobile-link" onclick={() => menuOpen = false}>Документация</a>
-		<a href="/live-hints" class="mobile-link" onclick={() => menuOpen = false}>Подсказки</a>
+		<a href="/live-hints" class="mobile-link" onclick={() => menuOpen = false}>Live Режим</a>
 		<a href="/meeting-prep" class="mobile-link" onclick={() => menuOpen = false}>Подготовка</a>
 		{#if $authStore.user?.role === 'admin'}
 			<a href="/admin" class="mobile-link" onclick={() => menuOpen = false}>Админ</a>
