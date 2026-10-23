@@ -14,6 +14,7 @@
 	interface ModelInfo {
 		id: string;
 		name: string;
+		local?: boolean;
 	}
 
 	interface Segment {
@@ -437,7 +438,7 @@
 			<select id="model" class="input" bind:value={selectedModel}>
 				<option value="">По умолчанию</option>
 				{#each models as m}
-					<option value={m.id}>{m.name}</option>
+					<option value={m.id}>{m.name}{m.local ? ' (локальная)' : ''}</option>
 				{/each}
 			</select>
 		</div>

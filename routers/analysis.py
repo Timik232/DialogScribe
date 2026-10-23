@@ -1,4 +1,5 @@
 import asyncio
+import os
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -198,11 +199,25 @@ async def post_chat(
         raise api_error(500, "internal_error", "Internal server error") from exc
 
 
+# Модели, развёрнутые на собственном инференсе (пометка «локальная» в UI).
+# Список можно переопределить через env, значение по умолчанию — домашний Qwen.
+LOCAL_LLM_MODELS = {
+    m.strip()
+    for m in os.getenv("LOCAL_LLM_MODELS", "qwen3.8-27b").split(",")
+    if m.strip()
+}
+
+
 @router.get("/models")
 def get_models(_user: User = Depends(get_current_user)) -> dict:
     try:
         models = get_available_models()
-        return {"models": [{"id": m, "name": m} for m in models]}
+        return {
+            "models": [
+                {"id": m, "name": m, "local": m in LOCAL_LLM_MODELS}
+                for m in models
+            ]
+        }
     except Exception as exc:
         logger.exception("Failed to list models (correlation_id=%s)", get_correlation_id())
         raise api_error(500, "internal_error", "Internal server error") from exc

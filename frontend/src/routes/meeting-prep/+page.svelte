@@ -5,7 +5,7 @@
 	import { Document, Packer, Paragraph, TextRun, HeadingLevel, Table, TableRow, TableCell, WidthType, BorderStyle, AlignmentType } from 'docx';
 	import { saveAs } from 'file-saver';
 
-	let models: Array<{ id: string; name: string }> = $state([]);
+	let models: Array<{ id: string; name: string; local?: boolean }> = $state([]);
 	let selectedModel = $state('');
 
 	let companyData = $state('');
@@ -240,7 +240,7 @@
 					<label for="model-select">Модель</label>
 					<select id="model-select" class="input" bind:value={selectedModel} disabled={generating}>
 						{#each models as m}
-							<option value={m.id}>{m.name}</option>
+							<option value={m.id}>{m.name}{m.local ? ' (локальная)' : ''}</option>
 						{/each}
 					</select>
 				</div>

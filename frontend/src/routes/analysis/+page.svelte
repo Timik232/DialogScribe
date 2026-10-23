@@ -6,7 +6,7 @@
 
 	// ── State ──
 
-	let models: Array<{ id: string; name: string }> = $state([]);
+	let models: Array<{ id: string; name: string; local?: boolean }> = $state([]);
 	let templates: Array<{ slug: string; name: string; emoji: string; is_custom: boolean }> = $state([]);
 	let selectedModel = $state("");
 	let selectedTemplate = $state("general");
@@ -410,7 +410,7 @@
 					<label for="model-select">Модель</label>
 					<select id="model-select" class="input" bind:value={selectedModel}>
 						{#each models as m}
-							<option value={m.id}>{m.name}</option>
+							<option value={m.id}>{m.name}{m.local ? ' (локальная)' : ''}</option>
 						{/each}
 					</select>
 				</div>
