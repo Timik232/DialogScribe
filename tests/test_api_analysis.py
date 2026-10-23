@@ -169,7 +169,7 @@ class TestModels:
     def test_list_models(self, client):
         with patch(
             "routers.analysis.get_available_models",
-            return_value=["gpt-4", "claude-3", "mistral-large"],
+            return_value=["gpt-4", "claude-3", "qwen3.8-27b"],
         ):
             resp = client.get("/api/models")
 
@@ -178,6 +178,9 @@ class TestModels:
         assert len(data["models"]) == 3
         assert data["models"][0]["id"] == "gpt-4"
         assert data["models"][0]["name"] == "gpt-4"
+        assert data["models"][0]["local"] is False
+        assert data["models"][2]["id"] == "qwen3.8-27b"
+        assert data["models"][2]["local"] is True
 
     def test_list_models_empty(self, client):
         with patch("routers.analysis.get_available_models", return_value=[]):
