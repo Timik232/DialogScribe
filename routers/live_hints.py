@@ -115,6 +115,7 @@ class _LiveHintsSession:
         self._session_config: dict | None = None
         self._last_hint_time = 0.0
         self._transcript_segments: deque[str] = deque(maxlen=self._bounds.max_segments)
+        self._source_tails: dict[str, str] = {}
         self._stats = _SessionStats()
         self._recv_queue: asyncio.Queue = asyncio.Queue(maxsize=self._bounds.recv_queue)
         self._process_queue: asyncio.Queue = asyncio.Queue(maxsize=self._bounds.process_queue)
@@ -288,6 +289,41 @@ class _LiveHintsSession:
 
     # ── audio processing ───────────────────────────────────────
 
+    @staticmethod
+    def _dedup_overlap(prev_tail: str, new_text: str) -> str:
+        """Вырезает из начала new_text пересечение с prev_tail.
+
+        Клиент шлёт чанки с перекрытием (~1.5с), чтобы слова на стыках не
+        резались. Пересечение ищем как наибольший общий «хвост-начало»:
+        последние слова prev_tail, совпадающие с первыми словами new_text.
+        Сравниваем пословно (нормализованные токены), до 30 слов глубиной.
+        """
+        import re as _re
+
+        def _tokens(s: str) -> list[str]:
+            return _re.findall(r"[\wа-яё]+", s.lower(), flags=_re.UNICODE)
+
+        prev = _tokens(prev_tail)
+        new = _tokens(new_text)
+        if not prev or not new:
+            return new_text
+
+        max_overlap = 0
+        for k in range(1, min(len(prev), len(new), 30) + 1):
+            if prev[-k:] == new[:k]:
+                max_overlap = k
+        if max_overlap == 0:
+            return new_text
+
+        # Отрезаем ровно max_overlap слов от начала new_text, сохраняя
+        # исходную пунктуацию/регистр: ищем место после k-го слова.
+        words = _re.findall(r"[\wа-яё]+", new_text, flags=_re.IGNORECASE | _re.UNICODE)
+        pos = 0
+        for i in range(max_overlap):
+            pos = new_text.find(words[i], pos)
+            pos += len(words[i])
+        return new_text[pos:].lstrip(" ,.!?;:-")
+
     async def _process_audio(self, source: str, audio: bytes) -> None:
         speaker = "user" if source == "mic" else "opponent"
         prefix = "[Вы]:" if speaker == "user" else "[Оппонент]:"
@@ -322,7 +358,17 @@ class _LiveHintsSession:
             return
 
         now = time.time()
-        clean_text = text.strip()
+        raw_text = text.strip()
+        tail = self._source_tails.get(source)
+        clean_text = self._dedup_overlap(tail, raw_text) if tail else raw_text
+        # храним хвост ДО вычитания — пересечение следующего чанка с этим
+        self._source_tails[source] = raw_text[-200:]
+
+        if not clean_text:
+            # весь чанк — чистое пересечение с предыдущим (дубль), не шлём
+            self._transcript_segments.append(f"{prefix} {raw_text}")
+            return
+
         segment = f"{prefix} {clean_text}"
         self._transcript_segments.append(segment)
 
@@ -515,6 +561,7 @@ class _LiveHintsSession:
             except Exception:
                 logger.debug("audio adapter close failed", exc_info=True)
             self._transcript_segments.clear()
+            self._source_tails.clear()
             await self._channel.shutdown()
             await close_ws(self._ws, 1000)
 

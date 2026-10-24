@@ -53,6 +53,10 @@
 
 		let headerOnly: Blob | null = null;
 		let pendingBlobs: Blob[] = [];
+		// Последний кластер держим в резерве: следующий чанк включает его
+		// ПЕРЕД новыми кластерами — перекрытие ~1.5-3с, чтобы слова на стыке
+		// чанков не резались. Сервер вычитает дубль (_dedup_overlap).
+		let lastCluster: Blob | null = null;
 
 		// WebM Cluster ID (0x1F43B675) — граница, после которой в первом блобе
 		// начинается аудио. Заголовок до неё (EBML/Segment/Tracks) нужен ffmpeg
@@ -76,9 +80,13 @@
 
 		function sendAccumulated(): void {
 			if (pendingBlobs.length === 0 || !headerOnly) return;
-			const completeBlob = new Blob([headerOnly, ...pendingBlobs], { type: mimeType });
+			// Перекрытие: [header][последний кластер прошлого чанка][новые кластеры]
+			const parts: Blob[] = [headerOnly];
+			if (lastCluster) parts.push(lastCluster);
+			parts.push(...pendingBlobs);
+			lastCluster = pendingBlobs[pendingBlobs.length - 1];
 			pendingBlobs = [];
-			sendBlob(completeBlob);
+			sendBlob(new Blob(parts, { type: mimeType }));
 		}
 
 		recorder.ondataavailable = (e: BlobEvent) => {
@@ -101,6 +109,7 @@
 		recorder.onstop = () => {
 			sendAccumulated();
 			headerOnly = null;
+			lastCluster = null;
 			pendingBlobs = [];
 		};
 
