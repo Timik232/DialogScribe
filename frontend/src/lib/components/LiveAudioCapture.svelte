@@ -51,35 +51,62 @@
 
 		const recorder = new MediaRecorder(stream, { mimeType });
 
-		let headerBlob: Blob | null = null;
-		let chunkBuffer: Blob[] = [];
+		let headerOnly: Blob | null = null;
+		let pendingBlobs: Blob[] = [];
 
-		function sendAccumulated(): void {
-			if (!headerBlob || chunkBuffer.length === 0) return;
-			const completeBlob = new Blob([headerBlob, ...chunkBuffer], { type: mimeType });
-			chunkBuffer = [];
-			if (completeBlob.size < 100) return;
-			completeBlob.arrayBuffer().then((buffer) => {
+		// WebM Cluster ID (0x1F43B675) — граница, после которой в первом блобе
+		// начинается аудио. Заголовок до неё (EBML/Segment/Tracks) нужен ffmpeg
+		// для декодирования каждого следующего кластера.
+		function splitHeader(buffer: ArrayBuffer): Blob {
+			const bytes = new Uint8Array(buffer);
+			for (let i = 0; i + 4 <= bytes.length; i++) {
+				if (bytes[i] === 0x1f && bytes[i + 1] === 0x43 && bytes[i + 2] === 0xb6 && bytes[i + 3] === 0x75) {
+					return new Blob([bytes.slice(0, i)], { type: mimeType });
+				}
+			}
+			return new Blob([bytes], { type: mimeType });
+		}
+
+		function sendBlob(blob: Blob): void {
+			if (blob.size < 100) return;
+			blob.arrayBuffer().then((buffer) => {
 				onchunk?.(buffer, source);
 			});
 		}
 
+		function sendAccumulated(): void {
+			if (pendingBlobs.length === 0 || !headerOnly) return;
+			const completeBlob = new Blob([headerOnly, ...pendingBlobs], { type: mimeType });
+			pendingBlobs = [];
+			sendBlob(completeBlob);
+		}
+
 		recorder.ondataavailable = (e: BlobEvent) => {
 			if (e.data.size <= 0) return;
-			if (!headerBlob) {
-				headerBlob = e.data;
-			} else {
-				chunkBuffer.push(e.data);
+			if (!headerOnly) {
+				// Первый блоб = заголовок + первые ~3с аудио. Отправляем его целиком
+				// (транскрибируются один раз), а в headerOnly оставляем только
+				// заголовок без первого кластера — иначе первые ~3с приклеивались
+				// бы к каждому чанку и транскрибировались заново (дубли фраз).
+				e.data.arrayBuffer().then((buffer) => {
+					headerOnly = splitHeader(buffer);
+				});
+				sendBlob(e.data);
+				return;
 			}
+			pendingBlobs.push(e.data);
+			sendAccumulated();
 		};
 
 		recorder.onstop = () => {
 			sendAccumulated();
-			headerBlob = null;
-			chunkBuffer = [];
+			headerOnly = null;
+			pendingBlobs = [];
 		};
 
-		const sendTimer = setInterval(sendAccumulated, 5_000);
+		// Страховочный сброс (обычно pending уже пуст — отправка идёт сразу
+		// в ondataavailable, latency = 3с timeslice + ASR).
+		const sendTimer = setInterval(sendAccumulated, 3_000);
 		recorder.start(3000);
 		return { recorder, sendTimer };
 	}
