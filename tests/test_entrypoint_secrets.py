@@ -32,10 +32,17 @@ def run_shim(secrets_path: Path | None) -> subprocess.CompletedProcess[str]:
 class TestValidJson:
     def test_allowlisted_keys_rendered_shell_quoted(self, tmp_path):
         secrets = tmp_path / "secrets.json"
-        secrets.write_text('{"JWT_SECRET": "abc123", "DATABASE_URL": "pg://x"}', encoding="utf-8")
+        secrets.write_text(
+            '{"JWT_SECRET": "abc123", "DATABASE_URL": "pg://x", '
+            '"WS_ALLOWED_ORIGINS": "https://diar.komolov.synology.me"}',
+            encoding="utf-8",
+        )
         result = run_shim(secrets)
         assert result.returncode == 0
-        assert result.stdout == "JWT_SECRET='abc123'\nDATABASE_URL='pg://x'\n"
+        assert result.stdout == (
+            "JWT_SECRET='abc123'\nDATABASE_URL='pg://x'\n"
+            "WS_ALLOWED_ORIGINS='https://diar.komolov.synology.me'\n"
+        )
         assert result.stderr == ""
 
     def test_non_allowlisted_keys_skipped(self, tmp_path):
