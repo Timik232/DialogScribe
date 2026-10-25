@@ -179,6 +179,22 @@ class TestGigaAMTranscriberValidation:
         with pytest.raises(FileNotFoundError):
             transcriber._validate_input(Path("/nonexistent/file.wav"))
 
+    def test_get_speaker_segments_unknown_mode_raises(self):
+        """Неизвестный режим диаризации — явная ошибка, а не пустой список.
+
+        Регрессия: «advanced» из фронтенд-словаря без маппинга молча
+        возвращал [] и превращался в EmptyAudioError («нет речи»).
+        """
+        from gigaam_transcriber.exceptions import DiarizationError
+
+        transcriber = GigaAMTranscriber()
+
+        with pytest.raises(DiarizationError, match="Неизвестный режим"):
+            transcriber._get_speaker_segments(
+                Path("/nonexistent/file.wav"),
+                mode="advanced",  # type: ignore[arg-type]  # намеренно невалидное
+            )
+
 
 class TestCreateTranscriberFunction:
     """Тесты для функции create_transcriber."""

@@ -182,6 +182,34 @@ class TestJobsApi:
         resp = c.post("/api/jobs", files=[_audio_file("../evil.wav")])
         assert resp.status_code == 400
 
+    def test_diarization_mode_is_mapped_for_transcriber(self, client):
+        """Regression: фронтенд-словарь {simple, advanced} должен доходить до
+        transcribe() как внутренний DiarizationMode, а не падать на
+        EmptyAudioError (неизвестный режим молча давал [] сегментов).
+        """
+        c, mock_t, _ = client
+
+        cases = [("simple", "hybrid"), ("advanced", "pyannote"), ("pyannote", "pyannote")]
+        modes = []
+        for frontend_mode, expected in cases:
+            resp = c.post(
+                "/api/jobs",
+                files=[_audio_file(f"dio-{frontend_mode}.wav")],
+                data={"diarization_mode": frontend_mode},
+            )
+            assert resp.status_code == 202, resp.text
+            # ждём завершения до следующей отправки: семафор джобов по
+            # умолчанию пропускает 2 параллельно, и на слабом CI три
+            # одновременных не укладываются в таймаут _wait_terminal
+            final = _wait_terminal(c, resp.json()["id"])
+            assert final["status"] == "completed", final
+            job_modes = [call.kwargs["diarization"] for call in mock_t.transcribe.call_args_list]
+            assert job_modes == [expected], (frontend_mode, job_modes)
+            modes.append(job_modes[0])
+            mock_t.transcribe.reset_mock()
+
+        assert modes == [expected for _, expected in cases]
+
     def test_foreign_job_404(self, client):
         c, _, _ = client
         resp = c.get("/api/jobs/00000000-0000-0000-0000-000000000000")

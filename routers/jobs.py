@@ -35,12 +35,17 @@ from gigaam_transcriber.jobs import (
 from gigaam_transcriber.limits import check_limit
 from gigaam_transcriber.models import User
 from gigaam_transcriber.rate_limit import user_rate_limit
-from routers._helpers import logger
+from routers._helpers import _map_diarization, logger
 from routers._uploads import spool_upload
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
-_ALLOWED_DIARIZATION = {"none", "simple", "advanced"}
+# Фронтенд присылает {none, simple, advanced}; API-потребители могут слать
+# и «внутренние» имена режимов {pyannote, hybrid} — принимаем оба словаря
+# и нормализуем к DiarizationMode через _map_diarization (как /api/transcribe
+# и autoflow). Раньше «advanced» проходил валидацию, но без маппинга уезжал
+# в transcribe(), где неизвестный режим молча давал [] → EmptyAudioError.
+_ALLOWED_DIARIZATION = {"none", "simple", "advanced", "pyannote", "hybrid"}
 _ALLOWED_DENOISE = {"none", "light", "medium"}
 _MAX_LANG_LEN = 8
 
@@ -54,6 +59,7 @@ def _clean_params(
     dio = (diarization_mode or "none").strip().lower()
     if dio not in _ALLOWED_DIARIZATION:
         raise HTTPException(status_code=400, detail="Invalid diarization_mode")
+    dio = _map_diarization(dio)
     den = (denoise or "none").strip().lower()
     if den not in _ALLOWED_DENOISE:
         raise HTTPException(status_code=400, detail="Invalid denoise")
