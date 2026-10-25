@@ -39,6 +39,7 @@ from .diarization import (
     release_diarization_models,
 )
 from .exceptions import (
+    DiarizationError,
     EmptyAudioError,
     EmptyFileError,
     UnsupportedFormatError,
@@ -451,7 +452,10 @@ class GigaAMTranscriber:
                 num_speakers=kwargs.get("num_speakers"),
             )
 
-        return []
+        raise DiarizationError(
+            f"Неизвестный режим диаризации: {mode!r} "
+            "(ожидается none/pyannote/hybrid)"
+        )
 
     def transcribe(
         self,

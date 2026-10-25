@@ -150,7 +150,11 @@ class TestBoundedPipeline:
         async def fake_process(audio: bytes, source: str) -> str:
             nonlocal processed
             processed += 1
-            return "цена 100 руб и вопрос?"
+            # уникальный текст на чанк: серверный overlap-dedup (c9b4740)
+            # вырезает пересечение с хвостом предыдущего чанка, поэтому
+            # 500 идентичных ответов дали бы 1 transcript и вечное ожидание
+            # stop_until; реальные чанки тоже не идентичны
+            return f"реплика номер {processed}"
 
         patched_deps.adapter.process_chunk_bytes = AsyncMock(side_effect=fake_process)
 
