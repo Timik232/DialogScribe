@@ -62,22 +62,45 @@ class TestSettingsRouter:
         assert resp.json() == {"provider": "litellm"}
 
     def test_put_persists_and_roundtrips(self, client, unique_user):
-        resp = client.put("/api/settings/asr-provider", json={"provider": "mistral"})
+        resp = client.put("/api/settings/asr-provider", json={"provider": "litellm"})
 
         assert resp.status_code == 200
-        assert resp.json() == {"provider": "mistral"}
-        assert client.get("/api/settings/asr-provider").json() == {"provider": "mistral"}
-
-        resp = client.put("/api/settings/asr-provider", json={"provider": "litellm"})
         assert resp.json() == {"provider": "litellm"}
+        assert client.get("/api/settings/asr-provider").json() == {"provider": "litellm"}
+
+    def test_put_rejects_removed_mistral_provider(self, client, unique_user):
+        """Mistral удалён: PUT с ним отклоняется как неизвестный провайдер."""
+        resp = client.put("/api/settings/asr-provider", json={"provider": "mistral"})
+
+        assert resp.status_code == 422
 
     def test_put_rejects_unknown_provider(self, client, unique_user):
         resp = client.put("/api/settings/asr-provider", json={"provider": "gigaam"})
 
         assert resp.status_code == 422
 
+    def test_get_maps_legacy_mistral_to_default(self, client, unique_user):
+        """Сохранённое легаси-значение 'mistral' отдаётся как litellm."""
+        from gigaam_transcriber.models import UserSettings
+
+        # Вставляем строку с легаси-значением напрямую через сессию приложения
+        async def _seed():
+            from gigaam_transcriber.database import async_session_factory
+
+            async with async_session_factory() as session:
+                session.add(UserSettings(user_id=unique_user.id, asr_provider="mistral"))
+                await session.commit()
+
+        asyncio.run(_seed())
+
+        resp = client.get("/api/settings/asr-provider")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"provider": "litellm"}
+
     def test_settings_are_user_scoped(self, client, unique_user):
-        client.put("/api/settings/asr-provider", json={"provider": "mistral"})
+        """Строка настроек одного юзера не видна другому: GET отдаёт default."""
+        client.put("/api/settings/asr-provider", json={"provider": "litellm"})
 
         other = unique_user
         other.id = unique_user.id + "-other"
@@ -96,7 +119,7 @@ class TestSettingsRouter:
             resp = client.get("/api/settings/asr-provider")
             assert resp.status_code in (401, 403)
 
-            resp = client.put("/api/settings/asr-provider", json={"provider": "mistral"})
+            resp = client.put("/api/settings/asr-provider", json={"provider": "litellm"})
             assert resp.status_code in (401, 403)
         finally:
             setup_auth_override(app)
