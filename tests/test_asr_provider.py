@@ -17,7 +17,6 @@ from gigaam_transcriber.asr_provider import (
 from gigaam_transcriber.data_models import TranscriptionSegment
 from gigaam_transcriber.exceptions import ASRError
 from gigaam_transcriber.litellm_client import LiteLLMASRClient
-from gigaam_transcriber.mistral_client import MistralASRClient
 
 
 class _RecordingProvider(ASRProviderBase):
@@ -53,27 +52,31 @@ class _RecordingProvider(ASRProviderBase):
         self.calls.append(("close",))
 
 
-def _make_mistral_client(text: str = "текст") -> MistralASRClient:
-    client = MistralASRClient(min_request_interval=0)
-    audio = np.zeros(32000, dtype="float32")
-    client._load_audio = MagicMock(return_value=(audio, 16000))
-    client._send_transcription_request = MagicMock(return_value=text)
+def _make_litellm_client(text: str = "текст") -> LiteLLMASRClient:
+    client = LiteLLMASRClient()
+
+    async def fake_post(files, data):
+        return text
+
+    client._post_transcription = fake_post
     return client
 
 
-def test_mistral_transcribe_segments_accepts_language(tmp_path):
+def test_litellm_transcribe_segments_accepts_language(tmp_path):
     """Контракт ASRProviderBase: transcribe_segments принимает language."""
-    client = _make_mistral_client()
+    audio_path = tmp_path / "a.wav"
+    sf.write(audio_path, np.zeros(32000, dtype="float32"), 16000)
+    client = _make_litellm_client()
     segments = [{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"}]
 
-    result = client.transcribe_segments(str(tmp_path / "a.wav"), segments, language="ru")
+    result = asyncio.run(client.transcribe_segments(str(audio_path), segments, language="ru"))
 
     assert result[0].text == "текст"
     assert result[0].speaker == "SPEAKER_00"
 
 
-def test_fallback_to_mistral_secondary_no_typeerror(tmp_path):
-    """GigaAM (litellm) падает → mistral-секондари не должен ломаться с TypeError."""
+def test_fallback_to_secondary_no_typeerror(tmp_path):
+    """Primary (litellm) падает → secondary-спай не должен ломаться с TypeError."""
     audio_path = tmp_path / "audio.wav"
     sf.write(audio_path, np.zeros(16000, dtype="float32"), 16000)
 
@@ -84,12 +87,12 @@ def test_fallback_to_mistral_secondary_no_typeerror(tmp_path):
 
     litellm._post_transcription = failing_post
 
-    mistral = _make_mistral_client("fallback text")
+    secondary = _RecordingProvider(result="fallback text")
     provider = FallbackASRProvider(
         primary=litellm,
-        secondary=mistral,
+        secondary=secondary,
         primary_name="litellm",
-        secondary_name="mistral",
+        secondary_name="spare",
     )
 
     result = asyncio.run(
@@ -105,9 +108,11 @@ def test_unknown_provider_defaults_to_litellm():
     """Неизвестный provider (напр. легаси 'gigaam') маршрутизируется на litellm."""
     provider = get_asr_provider("gigaam")
     try:
-        assert provider._primary_name == "litellm"
+        assert isinstance(provider, LiteLLMASRClient)
     finally:
-        asyncio.run(provider.close())
+        result = provider.close()
+        if asyncio.iscoroutine(result):
+            asyncio.run(result)
 
 
 def test_fallback_transcribe_forwards_all_options_to_both_providers(tmp_path):
@@ -164,14 +169,15 @@ def test_fallback_transcribe_raw_forwards_language_to_both(tmp_path):
     assert secondary.calls[0] == ("transcribe_raw", "file.webm", "fr")
 
 
-def test_mistral_client_transcribe_accepts_contract_kwargs(tmp_path):
-    """MistralASRClient.transcribe принимает language/diarization/denoise без TypeError."""
-    client = _make_mistral_client("contract ok")
-    audio_path = str(tmp_path / "a.wav")
-
-    result = client.transcribe(audio_path, language="ru", diarization=False, denoise=True)
-
-    assert result == "contract ok"
+def test_legacy_mistral_preference_routes_to_litellm():
+    """Легаси 'mistral' из сохранённых настроек маршрутизируется на litellm."""
+    provider = get_asr_provider("mistral")
+    try:
+        assert isinstance(provider, LiteLLMASRClient)
+    finally:
+        result = provider.close()
+        if asyncio.iscoroutine(result):
+            asyncio.run(result)
 
 
 def test_litellm_transcribe_segments_slices_audio(tmp_path):

@@ -34,12 +34,15 @@ async def invoke_provider(provider: Any, method_name: str, *args: Any, **kwargs:
 class ASRProvider(str, enum.Enum):
     """Supported ASR backends."""
 
-    MISTRAL = "mistral"
     LITELLM = "litellm"
 
 
 # Single source of truth for the default provider: ORM default, factory, settings router and frontend all consume this.
 DEFAULT_ASR_PROVIDER: ASRProvider = ASRProvider.LITELLM
+
+# Legacy provider names that no longer exist as backends. Stored user
+# preferences with these values are silently routed to the default.
+LEGACY_ASR_PROVIDERS = {"mistral"}
 
 
 class ASRProviderBase(abc.ABC):
@@ -185,19 +188,6 @@ def _create_provider(name: ASRProvider, max_retries: int | None = None) -> ASRPr
     keeps the provider default (3). Live-hints passes its session policy so
     retries have exactly one owner per request.
     """
-    if name is ASRProvider.MISTRAL:
-        from .mistral_client import MistralASRClient
-
-        kwargs: dict[str, Any] = {
-            "asr_url": os.getenv("ASR_URL", "https://api.mistral.ai"),
-            "model": os.getenv("ASR_MODEL", "voxtral-mini-latest"),
-            "api_key": os.getenv("MISTRAL_API_KEY", ""),
-            "proxy": os.getenv("PROXY_URL"),
-            "min_request_interval": float(os.getenv("ASR_MIN_INTERVAL", "1.0")),
-        }
-        if max_retries is not None:
-            kwargs["max_retries"] = max_retries
-        return MistralASRClient(**kwargs)
     if name is ASRProvider.LITELLM:
         from .litellm_client import LiteLLMASRClient
 
@@ -229,27 +219,21 @@ def get_asr_provider(
     Raises:
         ASRError: If both providers fail (when fallback is enabled).
     """
-    # Resolve preference → enum
+    # Resolve preference → enum; legacy 'mistral' routes to the default
     pref = (preference or DEFAULT_ASR_PROVIDER.value).strip().lower()
-    try:
-        primary_enum = ASRProvider(pref)
-    except ValueError:
-        logger.warning("Unknown ASR provider %r, defaulting to %s", preference, DEFAULT_ASR_PROVIDER.value)
+    if pref in LEGACY_ASR_PROVIDERS:
+        logger.warning("ASR provider %r was removed, defaulting to %s", preference, DEFAULT_ASR_PROVIDER.value)
         primary_enum = DEFAULT_ASR_PROVIDER
+    else:
+        try:
+            primary_enum = ASRProvider(pref)
+        except ValueError:
+            logger.warning("Unknown ASR provider %r, defaulting to %s", preference, DEFAULT_ASR_PROVIDER.value)
+            primary_enum = DEFAULT_ASR_PROVIDER
 
     primary = _create_provider(primary_enum, max_retries)
 
     if not fallback:
         return primary
 
-    secondary_enum = (
-        ASRProvider.LITELLM if primary_enum is ASRProvider.MISTRAL else ASRProvider.MISTRAL
-    )
-    secondary = _create_provider(secondary_enum, max_retries)
-
-    return FallbackASRProvider(
-        primary=primary,
-        secondary=secondary,
-        primary_name=primary_enum.value,
-        secondary_name=secondary_enum.value,
-    )
+    return primary

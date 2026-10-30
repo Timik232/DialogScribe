@@ -365,10 +365,8 @@ class TestRetrySingleOwner:
 
     def test_provider_default_retries_unchanged_for_other_consumers(self):
         from gigaam_transcriber.litellm_client import LiteLLMASRClient
-        from gigaam_transcriber.mistral_client import MistralASRClient
 
         assert LiteLLMASRClient()._max_retries == 3
-        assert MistralASRClient()._max_retries == 3
 
     def test_factory_forwards_max_retries(self):
         from gigaam_transcriber.asr_provider import get_asr_provider

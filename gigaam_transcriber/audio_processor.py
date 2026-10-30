@@ -501,8 +501,9 @@ class AudioProcessor:
         self,
         audio_path: Path | str,
         min_silence_len: int = 500,  # мс
-        silence_thresh: int = -40,  # дБ
+        silence_thresh: int | None = None,  # дБ; None → адаптивно от dBFS
         keep_silence: int = 200,  # мс
+        max_segment_seconds: float = 15.0,
     ) -> List[Tuple[float, float]]:
         """
         Разбиение аудио по паузам (тишине).
@@ -510,8 +511,15 @@ class AudioProcessor:
         Args:
             audio_path: Путь к аудио файлу
             min_silence_len: Минимальная длина тишины для разбиения (мс)
-            silence_thresh: Порог тишины в дБ
+            silence_thresh: Порог тишины в дБ. ``None`` (по умолчанию) —
+                адаптивный порог: dBFS записи минус 16 дБ (но не тише −40).
+                Фиксированный −40 не находил ни одной паузы на записях
+                с фоновым шумом/музыкой (dBFS −15), и гибридная диаризация
+                деградировала в один спикер на весь файл.
             keep_silence: Сколько тишины оставлять в начале/конце сегментов (мс)
+            max_segment_seconds: Сверхдлинные непрерывные участки речи без
+                пауз режутся на куски не длиннее этого, чтобы кластеризация
+                гибрида получала различимые эмбеддинги спикеров.
 
         Returns:
             Список кортежей (start, end) в секундах
@@ -522,9 +530,17 @@ class AudioProcessor:
         except ImportError:
             logger.warning("pydub не установлен, используем простое разбиение")
             duration = self.get_duration(audio_path)
-            return [(0, duration)]
+            return self._cap_segment_length([(0, duration)], max_segment_seconds)
 
         audio = AudioSegment.from_file(str(audio_path))
+
+        if silence_thresh is None:
+            # Адаптивный порог: тишина = на 16 дБ тише среднего уровня записи.
+            silence_thresh = max(int(audio.dBFS) - 16, -40)
+            logger.debug(
+                "split_by_silence: adaptive silence_thresh=%d dBFS (file dBFS=%.1f)",
+                silence_thresh, audio.dBFS,
+            )
 
         # Определение не-тихих сегментов
         nonsilent_ranges = detect_nonsilent(
@@ -541,7 +557,29 @@ class AudioProcessor:
             end_sec = min(len(audio), (end_ms + keep_silence)) / 1000.0
             segments.append((start_sec, end_sec))
 
-        return segments
+        return self._cap_segment_length(segments, max_segment_seconds)
+
+    @staticmethod
+    def _cap_segment_length(
+        segments: List[Tuple[float, float]],
+        max_segment_seconds: float,
+    ) -> List[Tuple[float, float]]:
+        """Разрезать сегменты длиннее max_segment_seconds на равные части."""
+        if max_segment_seconds <= 0:
+            return segments
+        capped: List[Tuple[float, float]] = []
+        for start, end in segments:
+            duration = end - start
+            if duration <= max_segment_seconds:
+                capped.append((start, end))
+                continue
+            parts = max(2, int(duration // max_segment_seconds) + 1)
+            step = duration / parts
+            for i in range(parts):
+                seg_start = start + i * step
+                seg_end = end if i == parts - 1 else start + (i + 1) * step
+                capped.append((seg_start, seg_end))
+        return capped
 
     def split_audio(
         self,

@@ -1,5 +1,5 @@
 """
-Основной класс GigaAMTranscriber - фасад для работы с Mistral Voxtral API.
+Основной класс GigaAMTranscriber — фасад для работы с LiteLLM ASR-шлюзом.
 
 Обеспечивает:
 - Транскрипцию аудио и видео файлов любой длительности
@@ -296,7 +296,7 @@ class _ProviderSession:
 
 class GigaAMTranscriber:
     """
-    Фасад транскрипции с использованием Mistral Voxtral API.
+    Фасад транскрипции через LiteLLM ASR-шлюз.
 
     Класс сохраняет имя для обратной совместимости,
     но внутри использует облачный ASR вместо локальной GigaAM модели.
@@ -305,8 +305,8 @@ class GigaAMTranscriber:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        asr_url: str = "https://api.mistral.ai",
-        asr_model: str = "voxtral-mini-latest",
+        asr_url: Optional[str] = None,
+        asr_model: Optional[str] = None,
         hf_token: Optional[str] = None,
         cache_dir: Optional[Path] = None,
         verbose: bool = False,
@@ -315,10 +315,12 @@ class GigaAMTranscriber:
         chunk_duration: float = CHUNK_DURATION_SEC,
         min_request_interval: float = 1.0,
     ) -> None:
-        self.api_key = api_key or os.getenv("MISTRAL_API_KEY", "")
-        self.asr_url = asr_url
-        self.asr_model = asr_model
-        self.proxy = proxy or os.getenv("PROXY_URL")
+        self.api_key = api_key or os.getenv("LITELLM_API_KEY", os.getenv("LLM_API_KEY", ""))
+        self.asr_url = asr_url or os.getenv(
+            "LITELLM_URL", "https://litellm.komolov.synology.me"
+        )
+        self.asr_model = asr_model or os.getenv("LITELLM_MODEL", "gigaamv3-generation")
+        _ = proxy  # сохранён для совместимости подписи; прокси больше не используется
         self.hf_token = hf_token or os.getenv("HF_TOKEN")
         self.cache_dir = (
             Path(cache_dir) if cache_dir else Path.home() / ".cache" / "gigaam_transcriber"
@@ -884,12 +886,12 @@ class GigaAMTranscriber:
 
 def create_transcriber(
     api_key: Optional[str] = None,
-    asr_url: str = "https://api.mistral.ai",
-    asr_model: str = "voxtral-mini-latest",
+    asr_url: Optional[str] = None,
+    asr_model: Optional[str] = None,
     hf_token: Optional[str] = None,
     **kwargs: Any,
 ) -> GigaAMTranscriber:
-    """Фабричная функция создания GigaAMTranscriber (на Mistral API)."""
+    """Фабричная функция создания GigaAMTranscriber (на LiteLLM ASR)."""
     return GigaAMTranscriber(
         api_key=api_key,
         asr_url=asr_url,
