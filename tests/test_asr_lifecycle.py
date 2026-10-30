@@ -19,7 +19,6 @@ from gigaam_transcriber import GigaAMTranscriber
 from gigaam_transcriber.asr_provider import ASRProviderBase
 from gigaam_transcriber.exceptions import ASRError, EmptyAudioError
 from gigaam_transcriber.litellm_client import LiteLLMASRClient
-from gigaam_transcriber.mistral_client import MistralASRClient
 from gigaam_transcriber import transcriber as transcriber_module
 from gigaam_transcriber.transcriber import _ProviderSession, _TranscriptionLimiter
 
@@ -345,16 +344,18 @@ class TestExactlyOnceClose:
             asyncio.run(provider.transcribe(str(audio)))
 
     def test_mistral_close_is_idempotent_and_guards(self, tmp_path):
-        import numpy as np
-        import soundfile as sf
+        # Mistral-провайдер удалён; проверяем, что фабрика не создаёт его
+        from gigaam_transcriber.asr_provider import get_asr_provider
 
-        provider = MistralASRClient(api_key="k")
-        provider.close()
-        provider.close()
-        audio = tmp_path / "a.wav"
-        sf.write(audio, np.zeros(16000, dtype="float32"), 16000)
-        with pytest.raises(ASRError, match="closed"):
-            provider.transcribe(str(audio))
+        provider = get_asr_provider("mistral")
+        try:
+            from gigaam_transcriber.litellm_client import LiteLLMASRClient
+
+            assert isinstance(provider, LiteLLMASRClient)
+        finally:
+            result = provider.close()
+            if asyncio.iscoroutine(result):
+                asyncio.run(result)
 
     def test_session_close_twice_calls_provider_once(self):
         spy = AsyncSpyProvider()

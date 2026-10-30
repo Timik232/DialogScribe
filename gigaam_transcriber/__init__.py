@@ -1,7 +1,7 @@
 """
 GigaAM Transcriber - микробиблиотека для транскрипции аудио и видео.
 
-Использует Mistral Voxtral API для транскрипции
+Использует LiteLLM ASR-шлюз (gigaamv3) для транскрипции
 с поддержкой диаризации спикеров через pyannote.
 
 Примеры использования:
@@ -9,7 +9,7 @@ GigaAM Transcriber - микробиблиотека для транскрипц�
     >>> from gigaam_transcriber import GigaAMTranscriber
 
     >>> # Простая транскрипция
-    >>> transcriber = GigaAMTranscriber(api_key="<MISTRAL_API_KEY>")
+    >>> transcriber = GigaAMTranscriber(api_key="<LITELLM_API_KEY>")
     >>> result = transcriber.transcribe("audio.wav")
     >>> print(result.text)
 
@@ -25,8 +25,8 @@ GigaAM Transcriber - микробиблиотека для транскрипц�
     >>> with GigaAMTranscriber() as transcriber:
     ...     result = transcriber.transcribe("audio.wav")
 
-ASR модели Mistral:
-- voxtral-mini-latest (по умолчанию)
+ASR бэкенд:
+- LiteLLM-шлюз → gigaamv3 (по умолчанию)
 
 Режимы диаризации:
 - "none" - без диаризации
@@ -45,7 +45,6 @@ __author__ = "GigaAM Transcriber"
 
 # Основной класс
 from .transcriber import GigaAMTranscriber, create_transcriber
-from .mistral_client import MistralASRClient
 
 # Структуры данных
 from .data_models import (
@@ -85,7 +84,6 @@ __all__ = [
     # Основной класс
     "GigaAMTranscriber",
     "create_transcriber",
-    "MistralASRClient",
     # Структуры данных
     "DiarizationMode",
     "OutputFormat",
@@ -137,7 +135,7 @@ def transcribe(
         input_path: Путь к аудио или видео файлу
         output_path: Путь для сохранения результата (опционально)
         diarization: Режим диаризации ("none", "pyannote", "hybrid")
-        api_key: API ключ Mistral (если не указан, берётся из MISTRAL_API_KEY)
+        api_key: API ключ ASR-шлюза (по умолчанию LITELLM_API_KEY/LLM_API_KEY)
         **kwargs: Дополнительные параметры
 
     Returns:

@@ -139,7 +139,10 @@ class LiteLLMASRClient(ASRProviderBase):
                 await asyncio.sleep(backoff)
                 continue
             except httpx.HTTPStatusError as exc:
-                if exc.response.status_code in (429, 503) and attempt < max_retries:
+                # 502/504 — транзиентные сбои шлюза/бэкенда под нагрузкой
+                # (наблюдались у triton-адаптера при батчах сегментов);
+                # без ретрая один 502 убивал весь прогон диаризации.
+                if exc.response.status_code in (429, 502, 503, 504) and attempt < max_retries:
                     backoff = min(1.0 * (2.0 ** attempt), 10.0)
                     logger.warning(
                         "LiteLLM status %d (attempt %d/%d), retry in %.1fs",

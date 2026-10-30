@@ -68,7 +68,7 @@ def print_banner():
             """
 ╔═══════════════════════════════════════════════════════════════╗
 ║           GigaAM Transcriber v{}                       ║
-║   Транскрипция аудио/видео на базе Mistral Voxtral       ║
+║   Транскрипция аудио/видео через LiteLLM ASR       ║
 ╚═══════════════════════════════════════════════════════════════╝
 """.format(__version__),
             fg="cyan",
@@ -115,10 +115,10 @@ class UnicodePathType(click.Path):
 )
 @click.option(
     "--api-key",
-    default=lambda: os.getenv("MISTRAL_API_KEY", ""),
-    help="API ключ Mistral (по умолчанию из MISTRAL_API_KEY)",
+    default=lambda: os.getenv("LITELLM_API_KEY", os.getenv("LLM_API_KEY", "")),
+    help="API ключ ASR-шлюза (по умолчанию из LITELLM_API_KEY/LLM_API_KEY)",
 )
-@click.option("--asr-url", default="https://api.mistral.ai", help="Базовый URL ASR API")
+@click.option("--asr-url", default=lambda: os.getenv("LITELLM_URL", "https://litellm.komolov.synology.me"), help="Базовый URL ASR API (LiteLLM)")
 @click.option(
     "--chunk-threshold",
     type=float,
@@ -150,7 +150,7 @@ def main(
     """
     GigaAM Audio/Video Transcriber
 
-    Транскрибирует аудио и видео файлы с использованием Mistral Voxtral API.
+    Транскрибирует аудио и видео файлы через LiteLLM ASR-шлюз.
 
     Примеры:
 
@@ -191,7 +191,7 @@ def main(
     try:
         if not quiet:
             click.echo(f"📁 Файл: {input_file}")
-            click.echo("🤖 ASR: Mistral Voxtral")
+            click.echo("🤖 ASR: LiteLLM (gigaamv3)")
             click.echo(f"🌐 ASR URL: {asr_url}")
             click.echo(f"🎤 Диаризация: {diarize}")
             click.echo("")
@@ -205,7 +205,7 @@ def main(
             chunk_duration=chunk_duration,
         ) as transcriber:
             if not quiet:
-                click.echo("🔄 Отправка аудио в Mistral ASR...")
+                click.echo("🔄 Отправка аудио в ASR...")
 
             # Транскрипция с индикатором прогресса
 
@@ -376,10 +376,10 @@ def format_duration(seconds: float) -> str:
 )
 @click.option(
     "--api-key",
-    default=lambda: os.getenv("MISTRAL_API_KEY", ""),
-    help="API ключ Mistral (по умолчанию из MISTRAL_API_KEY)",
+    default=lambda: os.getenv("LITELLM_API_KEY", os.getenv("LLM_API_KEY", "")),
+    help="API ключ ASR-шлюза (по умолчанию из LITELLM_API_KEY/LLM_API_KEY)",
 )
-@click.option("--asr-url", default="https://api.mistral.ai", help="Базовый URL ASR API")
+@click.option("--asr-url", default=lambda: os.getenv("LITELLM_URL", "https://litellm.komolov.synology.me"), help="Базовый URL ASR API (LiteLLM)")
 @click.option("-v", "--verbose", is_flag=True)
 def batch(input_files, output_dir, diarize, output_format, api_key, asr_url, verbose):
     """

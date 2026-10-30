@@ -26,14 +26,14 @@ class TestGigaAMTranscriberInit:
         """Тест инициализации с параметрами по умолчанию."""
         transcriber = GigaAMTranscriber()
 
-        assert transcriber.asr_model == "voxtral-mini-latest"
-        assert transcriber.asr_url == "https://api.mistral.ai"
+        assert transcriber.asr_model == "gigaamv3-generation"
+        assert transcriber.asr_url == "https://litellm.komolov.synology.me"
 
     def test_custom_asr_model(self):
         """Тест с кастомной моделью ASR."""
-        transcriber = GigaAMTranscriber(asr_model="voxtral-large-latest")
+        transcriber = GigaAMTranscriber(asr_model="custom-model-x")
 
-        assert transcriber.asr_model == "voxtral-large-latest"
+        assert transcriber.asr_model == "custom-model-x"
 
     def test_custom_asr_url(self):
         """Тест с кастомным URL ASR."""
@@ -42,8 +42,8 @@ class TestGigaAMTranscriberInit:
         assert transcriber.asr_url == "https://custom-asr.example.com"
 
     def test_api_key_from_env(self):
-        """Тест получения MISTRAL_API_KEY из переменной окружения."""
-        with patch.dict(os.environ, {"MISTRAL_API_KEY": "test-key-123"}):
+        """Тест получения ключа ASR-шлюза из LITELLM_API_KEY."""
+        with patch.dict(os.environ, {"LITELLM_API_KEY": "test-key-123"}):
             transcriber = GigaAMTranscriber()
 
             assert transcriber.api_key == "test-key-123"
@@ -56,7 +56,7 @@ class TestGigaAMTranscriberInit:
 
     def test_api_key_priority(self):
         """Тест приоритета явного ключа над env."""
-        with patch.dict(os.environ, {"MISTRAL_API_KEY": "env-key"}):
+        with patch.dict(os.environ, {"LITELLM_API_KEY": "env-key"}):
             transcriber = GigaAMTranscriber(api_key="explicit-key")
 
             assert transcriber.api_key == "explicit-key"
@@ -148,8 +148,8 @@ class TestGigaAMTranscriberGetModelInfo:
         assert "model_name" in info
         assert "asr_url" in info
         assert "provider" in info
-        assert info["model_name"] == "voxtral-mini-latest"
-        assert info["asr_url"] == "https://api.mistral.ai"
+        assert info["model_name"] == "gigaamv3-generation"
+        assert info["asr_url"] == "https://litellm.komolov.synology.me"
         assert info["provider"] == "per-request (via factory)"
         assert info["api_key_set"] is True
 
@@ -204,18 +204,18 @@ class TestCreateTranscriberFunction:
         transcriber = create_transcriber()
 
         assert isinstance(transcriber, GigaAMTranscriber)
-        assert transcriber.asr_model == "voxtral-mini-latest"
+        assert transcriber.asr_model == "gigaamv3-generation"
 
     def test_create_with_params(self):
         """Тест создания с параметрами."""
         transcriber = create_transcriber(
             api_key="test-key",
             asr_url="https://custom.example.com",
-            asr_model="voxtral-large-latest",
+            asr_model="custom-model-x",
             hf_token="test-hf",
         )
 
-        assert transcriber.asr_model == "voxtral-large-latest"
+        assert transcriber.asr_model == "custom-model-x"
         assert transcriber.asr_url == "https://custom.example.com"
         assert transcriber.api_key == "test-key"
         assert transcriber.hf_token == "test-hf"
@@ -277,7 +277,7 @@ class TestGigaAMTranscriberMocked:
         assert isinstance(result, TranscriptionResult)
         assert len(result.segments) == 1
         assert result.segments[0].text == "Тестовая транскрипция"
-        assert result.model_name == "voxtral-mini-latest"
+        assert result.model_name == "gigaamv3-generation"
 
     def test_transcribe_returns_duration(self, mock_transcriber, temp_dir):
         """Тест что результат содержит длительность."""
@@ -339,7 +339,7 @@ class TestGigaAMTranscriberMocked:
         info = mock_transcriber.get_model_info()
 
         assert info["api_key_set"] is True
-        assert info["model_name"] == "voxtral-mini-latest"
+        assert info["model_name"] == "gigaamv3-generation"
 
     def test_transcribe_batch(self, mock_transcriber, temp_dir):
         """Тест пакетной транскрипции."""
@@ -503,7 +503,7 @@ class TestGigaAMTranscriberASRError:
             transcriber = GigaAMTranscriber(
                 api_key="my-key",
                 asr_url="https://custom.api",
-                asr_model="voxtral-large",
+                asr_model="custom-model-y",
             )
 
             mock_processor = MagicMock()
