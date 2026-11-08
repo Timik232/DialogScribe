@@ -19,6 +19,7 @@ from gigaam_transcriber.limits import check_limit
 from gigaam_transcriber.mindmap import generate_mindmap_markdown
 from gigaam_transcriber.models import SavedTranscription, User
 from gigaam_transcriber.summarizer import LLMClient, generate_summary
+from gigaam_transcriber.titles import generate_title
 from gigaam_transcriber.usage import track_usage
 
 from routers._helpers import api_error, logger
@@ -219,7 +220,11 @@ async def create_transcription(
     if not body.full_text or not body.full_text.strip():
         raise HTTPException(status_code=422, detail="full_text must not be empty")
 
-    title = body.title or _generate_default_title(body.duration)
+    # Явный заголовок пользователь выбрал сам — уважаем его; иначе LLM
+    # формулирует суть диалога, а при недоступности LLM — дефолт с датой.
+    title = (body.title or "").strip()
+    if not title:
+        title = await generate_title(body.full_text) or _generate_default_title(body.duration)
     _reject_oversized(
         {
             "title": title,

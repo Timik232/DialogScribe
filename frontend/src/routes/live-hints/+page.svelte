@@ -67,7 +67,7 @@
 			await fetchApi('POST', '/api/saved-transcriptions', {
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
-					title: `Live ${new Date().toLocaleString('ru-RU')}`,
+					// Без title: бэкенд генерирует заголовок-суть через LLM
 					full_text: transcriptSegments.map((s) => `${s.speaker}: ${s.text}`).join('\n'),
 					segments: transcriptSegments,
 					speaker_names: {},

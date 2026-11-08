@@ -328,17 +328,6 @@
 		}
 	}
 
-	function generateDefaultTitle(r: TranscriptionResult): string {
-		const now = new Date();
-		const pad = (n: number) => String(n).padStart(2, '0');
-		const dateStr = `${pad(now.getDate())}.${pad(now.getMonth() + 1)}.${now.getFullYear()} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
-		const totalSec = Math.floor(r.duration || 0);
-		const mins = Math.floor(totalSec / 60);
-		const secs = totalSec % 60;
-		const durStr = mins > 0 ? `${mins}м ${secs}с` : `${secs}с`;
-		return `${dateStr} — ${durStr}`;
-	}
-
 	async function saveTranscription(): Promise<void> {
 		if (!result || saving || saved) return;
 		saving = true;
@@ -346,7 +335,7 @@
 			await fetchApi('POST', '/api/saved-transcriptions', {
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
-					title: generateDefaultTitle(result),
+					// Без title: бэкенд генерирует заголовок-суть через LLM
 					full_text: result.text,
 					segments: result.segments || [],
 					speaker_names: speakerNames || {},

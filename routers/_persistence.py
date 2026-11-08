@@ -18,6 +18,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gigaam_transcriber.models import SavedTranscription
+from gigaam_transcriber.titles import generate_title
 
 logger = logging.getLogger("dialogscribe-api")
 
@@ -83,7 +84,10 @@ async def persist_transcription_result(
 
     obj = SavedTranscription(
         user_id=user_id,
-        title=_default_title(origin, float(result.get("duration") or 0.0), filename),
+        # Суть диалога от LLM (дата/длительность видны в списке расшифровок);
+        # при недоступности LLM — прежний дефолт с датой/именем файла.
+        title=await generate_title(text)
+        or _default_title(origin, float(result.get("duration") or 0.0), filename),
         full_text=text,
         segments_json=_normalize_segments(result.get("segments")),
         speaker_names=dict(result.get("speaker_names") or {}),
