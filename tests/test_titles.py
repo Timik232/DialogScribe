@@ -12,7 +12,7 @@ from gigaam_transcriber.titles import (
     generate_title,
     generate_title_sync,
 )
-from tests.conftest import setup_auth_override
+from tests.conftest import make_mock_user
 
 
 class _FakeLLM:
@@ -110,6 +110,23 @@ async def test_generate_title_timeout_returns_none(monkeypatch):
 # ── wiring: POST /saved-transcriptions ──────────────────────────────
 
 
+def _make_app(db):
+    """Свежее приложение с override'ами, устойчивыми к importlib.reload
+    в других сьютах: зависимость переопределяем по объекту из модуля
+    РОУТЕРА (см. урок в dialogscribe-admin: reload(auth) рассинхронизирует
+    override по объекту из gigaam_transcriber.auth → 401)."""
+    from fastapi import FastAPI
+
+    from gigaam_transcriber.database import get_db
+    from routers import saved_transcriptions as st_router
+
+    app = FastAPI()
+    app.include_router(st_router.router)
+    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[st_router.get_current_user] = lambda: make_mock_user()
+    return app
+
+
 def _capture_db():
     db = AsyncMock()
     saved = []
@@ -120,27 +137,25 @@ def _capture_db():
     return db, saved
 
 
-@pytest.mark.asyncio
-async def test_create_without_title_uses_llm(monkeypatch):
+def _create_test(monkeypatch, llm_title, payload):
     from fastapi.testclient import TestClient
 
-    from gigaam_transcriber.database import get_db
-    from routers.saved_transcriptions import router
-    from fastapi import FastAPI
-
     db, saved = _capture_db()
-    llm = AsyncMock(return_value="Согласование плана релиза")
+    llm = AsyncMock(return_value=llm_title)
     monkeypatch.setattr("routers.saved_transcriptions.generate_title", llm)
-
-    app = FastAPI()
-    app.include_router(router)
-    app.dependency_overrides[get_db] = lambda: db
-    setup_auth_override(app)
+    app = _make_app(db)
     with TestClient(app) as client:
-        resp = client.post(
-            "/api/saved-transcriptions",
-            json={"full_text": "Иван: когда релиз? Мария: в декабре.", "duration": 61.0},
-        )
+        resp = client.post("/api/saved-transcriptions", json=payload)
+    return resp, llm, saved
+
+
+@pytest.mark.asyncio
+async def test_create_without_title_uses_llm(monkeypatch):
+    resp, llm, saved = _create_test(
+        monkeypatch,
+        "Согласование плана релиза",
+        {"full_text": "Иван: когда релиз? Мария: в декабре.", "duration": 61.0},
+    )
     assert resp.status_code == 201
     assert resp.json()["title"] == "Согласование плана релиза"
     llm.assert_awaited_once()
@@ -149,29 +164,11 @@ async def test_create_without_title_uses_llm(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_create_with_explicit_title_skips_llm(monkeypatch):
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-
-    from gigaam_transcriber.database import get_db
-    from routers.saved_transcriptions import router
-
-    db, saved = _capture_db()
-    llm = AsyncMock(return_value="не должно использоваться")
-    monkeypatch.setattr("routers.saved_transcriptions.generate_title", llm)
-
-    app = FastAPI()
-    app.include_router(router)
-    app.dependency_overrides[get_db] = lambda: db
-    setup_auth_override(app)
-    with TestClient(app) as client:
-        resp = client.post(
-            "/api/saved-transcriptions",
-            json={
-                "full_text": "текст",
-                "duration": 10.0,
-                "title": "  Мой заголовок  ",
-            },
-        )
+    resp, llm, saved = _create_test(
+        monkeypatch,
+        "не должно использоваться",
+        {"full_text": "текст", "duration": 10.0, "title": "  Мой заголовок  "},
+    )
     assert resp.status_code == 201
     assert resp.json()["title"] == "Мой заголовок"
     assert llm.await_count == 0
@@ -179,25 +176,9 @@ async def test_create_with_explicit_title_skips_llm(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_create_llm_failure_falls_back_to_default(monkeypatch):
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-
-    from gigaam_transcriber.database import get_db
-    from routers.saved_transcriptions import router
-
-    db, saved = _capture_db()
-    llm = AsyncMock(return_value=None)
-    monkeypatch.setattr("routers.saved_transcriptions.generate_title", llm)
-
-    app = FastAPI()
-    app.include_router(router)
-    app.dependency_overrides[get_db] = lambda: db
-    setup_auth_override(app)
-    with TestClient(app) as client:
-        resp = client.post(
-            "/api/saved-transcriptions",
-            json={"full_text": "текст", "duration": 65.0},
-        )
+    resp, llm, saved = _create_test(
+        monkeypatch, None, {"full_text": "текст", "duration": 65.0}
+    )
     assert resp.status_code == 201
     # default: "dd.mm.yyyy hh:mm — 1m 5s"
     assert resp.json()["title"].endswith("— 1m 5s")
