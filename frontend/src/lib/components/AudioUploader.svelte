@@ -25,6 +25,12 @@
 	let mediaRecorder: MediaRecorder | null = $state(null);
 	let chunks: Blob[] = [];
 	let selectedMicId = $state("");
+	let recordingSeconds = $state(0);
+	let recordingTimer: ReturnType<typeof setInterval> | undefined;
+
+	$effect(() => {
+		return () => stopRecordingTimer();
+	});
 
 	function getExt(filename: string): string {
 		const dot = filename.lastIndexOf('.');
@@ -41,6 +47,22 @@
 		const m = Math.floor(seconds / 60);
 		const s = Math.floor(seconds % 60);
 		return `${m}:${s.toString().padStart(2, '0')}`;
+	}
+
+	function formatRecordingTime(total: number): string {
+		const h = Math.floor(total / 3600);
+		const m = Math.floor((total % 3600) / 60);
+		const s = total % 60;
+		if (h > 0) return `${h} ч ${m} мин`;
+		if (m > 0) return `${m} мин ${s} с`;
+		return `${s} с`;
+	}
+
+	function stopRecordingTimer(): void {
+		if (recordingTimer) {
+			clearInterval(recordingTimer);
+			recordingTimer = undefined;
+		}
 	}
 
 	function validate(file: File): string {
@@ -112,6 +134,7 @@
 		if (micRecording) {
 			mediaRecorder?.stop();
 			micRecording = false;
+			stopRecordingTimer();
 			return;
 		}
 
@@ -141,6 +164,8 @@
 
 			recorder.start();
 			micRecording = true;
+			recordingSeconds = 0;
+			recordingTimer = setInterval(() => recordingSeconds++, 1000);
 		} catch {
 			micDenied = true;
 		}
@@ -251,6 +276,12 @@
 				Записать с микрофона
 			{/if}
 		</button>
+		{#if micRecording}
+			<span class="recording-time">
+				<span class="mic-dot recording"></span>
+				{formatRecordingTime(recordingSeconds)}
+			</span>
+		{/if}
 		{#if micDenied}
 			<span class="mic-denied">Доступ к микрофону запрещён</span>
 		{/if}
@@ -392,6 +423,7 @@
 		display: flex;
 		align-items: center;
 		gap: 0.75rem;
+		flex-wrap: wrap;
 	}
 
 	.mic-btn {
@@ -409,6 +441,16 @@
 
 	.mic-dot.recording {
 		animation: pulse-dot 1s ease-in-out infinite;
+	}
+
+	.recording-time {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.5rem;
+		font-size: 0.9375rem;
+		font-variant-numeric: tabular-nums;
+		color: var(--color-error-text, #D32F2F);
+		white-space: nowrap;
 	}
 
 	@keyframes pulse-dot {
