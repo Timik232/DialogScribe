@@ -423,6 +423,7 @@
 		display: flex;
 		align-items: center;
 		gap: 0.75rem;
+		flex-wrap: wrap;
 	}
 
 	.mic-btn {
@@ -449,6 +450,7 @@
 		font-size: 0.9375rem;
 		font-variant-numeric: tabular-nums;
 		color: var(--color-error-text, #D32F2F);
+		white-space: nowrap;
 	}
 
 	@keyframes pulse-dot {
