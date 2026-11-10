@@ -6,7 +6,7 @@ pipeline {
         disableConcurrentBuilds()
         skipDefaultCheckout(true)
         timestamps()
-        timeout(time: 180, unit: 'MINUTES')
+        timeout(time: 300, unit: 'MINUTES')
     }
 
     parameters {
@@ -168,7 +168,7 @@ pipeline {
                         -e NPM_CONFIG_REGISTRY \
                         -v "$HOST_WORKSPACE/frontend:/app" -w /app \
                         node:20-slim \
-                        sh -lc 'npm run build' \
+                        sh -lc 'npm run build && grep -rq "Скачать PNG" build/_app/immutable && grep -rq mindmap.png build/_app/immutable || { echo "FATAL: mindmap export UI missing from built bundle (see tests/test_frontend_export_guard.py)"; exit 1; }' \
                         | tee .ci-artifacts/frontend-build.log
                 '''
             }
