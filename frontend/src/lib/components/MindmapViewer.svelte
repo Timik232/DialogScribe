@@ -78,39 +78,177 @@
 		URL.revokeObjectURL(url);
 	}
 
-	function exportPNG() {
+	// markmap renders node labels as HTML inside <foreignObject>, which taints the
+	// rasterization canvas in Chromium (toBlob → null, the PNG button silently does
+	// nothing) and is not rendered by many SVG consumers. Before any export, build
+	// a portable copy of the live mindmap with native SVG <text> labels, explicit
+	// width/height/viewBox and a background rect.
+	type PortableSvg = { svgString: string; width: number; height: number };
+
+	function buildPortableSvg(): PortableSvg | null {
 		const svg = svgEl;
-		if (!svg) return;
+		if (!svg) return null;
 
-		const serializer = new XMLSerializer();
-		const svgStr = serializer.serializeToString(svg);
-		const svgBlob = new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' });
-		const url = URL.createObjectURL(svgBlob);
+		const ctm = svg.getScreenCTM();
+		if (!ctm) return null;
+		const inverse = ctm.inverse();
+		const toUser = (x: number, y: number) => {
+			const pt = svg.createSVGPoint();
+			pt.x = x;
+			pt.y = y;
+			return pt.matrixTransform(inverse);
+		};
 
+		// Capture the browser's own line wrapping: walk every word of every label
+		// as a DOM Range, group ranges by their rendered vertical position.
+		// Grouping is per-label: two labels at the same height must stay separate.
+		type LabelLine = { words: string[]; left: number; bottom: number; height: number };
+		type Label = { lines: LabelLine[]; font: string; weight: string; color: string };
+		const labels: Label[] = [];
+		const range = document.createRange();
+		for (const fo of Array.from(svg.querySelectorAll('foreignObject'))) {
+			const labelDiv = (fo.querySelector('div > div') ?? fo.querySelector('div')) as HTMLElement | null;
+			if (!labelDiv) continue;
+			const divStyle = getComputedStyle(labelDiv);
+			const linesByTop = new Map<number, LabelLine>();
+			const walker = document.createTreeWalker(labelDiv, NodeFilter.SHOW_TEXT);
+			let node: Node | null;
+			while ((node = walker.nextNode())) {
+				const text = node.nodeValue ?? '';
+				const re = /\S+/g;
+				let match: RegExpExecArray | null;
+				while ((match = re.exec(text))) {
+					range.setStart(node, match.index);
+					range.setEnd(node, match.index + match[0].length);
+					const rect = range.getBoundingClientRect();
+					if (rect.width === 0 && rect.height === 0) continue;
+					const key = Math.round(rect.top);
+					let line = linesByTop.get(key);
+					if (!line) {
+						line = { words: [], left: rect.left, bottom: rect.bottom, height: rect.height };
+						linesByTop.set(key, line);
+					}
+					line.words.push(match[0]);
+					line.left = Math.min(line.left, rect.left);
+					line.bottom = Math.max(line.bottom, rect.bottom);
+					line.height = Math.max(line.height, rect.height);
+				}
+			}
+			if (linesByTop.size > 0) {
+				labels.push({
+					lines: Array.from(linesByTop.values()),
+					font: divStyle.fontFamily || 'sans-serif',
+					weight: divStyle.fontWeight || '400',
+					color: divStyle.color || '#1e293b'
+				});
+			}
+		}
+		range.detach();
+
+		// Clone the live SVG, drop the foreignObject labels and append <text>
+		// elements instead — placed at the SVG root in final user coordinates
+		// (already includes every zoom/translate transform).
+		const clone = svg.cloneNode(true) as SVGSVGElement;
+		for (const fo of Array.from(clone.querySelectorAll('foreignObject'))) fo.remove();
+
+		const ns = 'http://www.w3.org/2000/svg';
+		let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+		for (const label of labels) {
+			for (const line of label.lines) {
+				const text = line.words.join(' ');
+				if (!text) continue;
+				const p1 = toUser(line.left, line.bottom);
+				const p2 = toUser(line.left + 1, line.bottom - line.height);
+				const fontPx = Math.hypot(p2.x - p1.x, p2.y - p1.y); // px→user scale at this point
+				const baselineY = line.bottom - line.height * 0.22; // approx. baseline inside the line box
+				const anchor = toUser(line.left, baselineY);
+				const textEl = document.createElementNS(ns, 'text');
+				textEl.setAttribute('x', String(anchor.x));
+				textEl.setAttribute('y', String(anchor.y));
+				// Colors must survive outside the app: no CSS vars, no inherit.
+				textEl.setAttribute('fill', theme === 'dark' ? '#e2e8f0' : label.color);
+				textEl.setAttribute('font-size', `${Math.max(1, fontPx).toFixed(2)}px`);
+				textEl.setAttribute('font-family', label.font);
+				textEl.setAttribute('font-weight', label.weight);
+				textEl.textContent = text;
+				clone.appendChild(textEl);
+				minX = Math.min(minX, anchor.x);
+				maxX = Math.max(maxX, anchor.x + text.length * fontPx * 0.7);
+				minY = Math.min(minY, anchor.y - fontPx);
+				maxY = Math.max(maxY, anchor.y);
+			}
+		}
+
+		// Content bounds: getBBox covers paths/curves; union with text estimates.
+		let bbox: DOMRect;
+		try {
+			bbox = svg.getBBox();
+		} catch {
+			bbox = new DOMRect(0, 0, 0, 0);
+		}
+		minX = Math.min(minX, bbox.x);
+		minY = Math.min(minY, bbox.y);
+		maxX = Math.max(maxX, bbox.x + bbox.width);
+		maxY = Math.max(maxY, bbox.y + bbox.height);
+		if (!Number.isFinite(minX) || !Number.isFinite(minY)) return null;
+
+		const pad = 60;
+		const x = Math.floor(minX - pad);
+		const y = Math.floor(minY - pad);
+		const width = Math.ceil(maxX - minX + pad * 2);
+		const height = Math.ceil(maxY - minY + pad * 2);
+		if (width <= 0 || height <= 0) return null;
+
+		clone.setAttribute('viewBox', `${x} ${y} ${width} ${height}`);
+		clone.setAttribute('width', String(width));
+		clone.setAttribute('height', String(height));
+		clone.removeAttribute('class');
+		clone.removeAttribute('style');
+
+		// Background first child (var(--color-card) is not resolvable inside a file).
+		const bg = document.createElementNS(ns, 'rect');
+		bg.setAttribute('x', String(x));
+		bg.setAttribute('y', String(y));
+		bg.setAttribute('width', String(width));
+		bg.setAttribute('height', String(height));
+		bg.setAttribute('fill', theme === 'dark' ? '#0f172a' : '#ffffff');
+		clone.insertBefore(bg, clone.firstChild);
+
+		const svgString = new XMLSerializer().serializeToString(clone);
+		return { svgString, width, height };
+	}
+
+	function exportPNG() {
+		const portable = buildPortableSvg();
+		if (!portable) return;
+
+		const { svgString, width, height } = portable;
+		const url = URL.createObjectURL(new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' }));
 		const img = new Image();
 		img.onload = () => {
+			const scale = Math.min(2, 8192 / Math.max(width, height));
 			const canvas = document.createElement('canvas');
-			const scale = 2;
-			canvas.width = img.naturalWidth * scale;
-			canvas.height = img.naturalHeight * scale;
+			canvas.width = Math.round(width * scale);
+			canvas.height = Math.round(height * scale);
 			const ctx = canvas.getContext('2d');
-			if (!ctx) return;
-			ctx.scale(scale, scale);
-			ctx.drawImage(img, 0, 0);
+			if (!ctx) {
+				URL.revokeObjectURL(url);
+				return;
+			}
+			ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+			URL.revokeObjectURL(url);
 			canvas.toBlob((blob) => {
 				if (blob) downloadBlob(blob, 'mindmap.png');
 			}, 'image/png');
-			URL.revokeObjectURL(url);
 		};
+		img.onerror = () => URL.revokeObjectURL(url);
 		img.src = url;
 	}
 
 	function exportSVG() {
-		const svg = svgEl;
-		if (!svg) return;
-		const serializer = new XMLSerializer();
-		const svgStr = serializer.serializeToString(svg);
-		const blob = new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' });
+		const portable = buildPortableSvg();
+		if (!portable) return;
+		const blob = new Blob([portable.svgString], { type: 'image/svg+xml;charset=utf-8' });
 		downloadBlob(blob, 'mindmap.svg');
 	}
 
