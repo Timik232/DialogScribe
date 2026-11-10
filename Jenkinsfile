@@ -20,7 +20,7 @@ pipeline {
         APP_IMAGE = "dialogscribe-ci-app:${BUILD_NUMBER}"
         PIP_INDEX_URL = 'http://192.168.1.48:3141/root/pypi/+simple/'
         PIP_EXTRA_INDEX_URL = 'https://pypi.org/simple/'
-        NPM_CONFIG_REGISTRY = 'https://npm-mirror.gitverse.ru'
+        NPM_CONFIG_REGISTRY = 'https://registry.npmjs.org'
         JWT_SECRET = 'ci-test-only'
         HOST_WORKSPACE = '/DATA/AppData/jenkins/home/workspace/dialogscribe-ci'
     }
