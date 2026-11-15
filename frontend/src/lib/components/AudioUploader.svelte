@@ -20,9 +20,13 @@
 	let fileDuration = $state<number | null>(null);
 	let validationError = $state('');
 
-	let micRecording = $state(false);
-	let micDenied = $state(false);
+	type RecordSource = 'mic' | 'device' | 'mixed';
+
+	let recordSource = $state<RecordSource>('mic');
+	let isRecording = $state(false);
+	let captureError = $state('');
 	let mediaRecorder: MediaRecorder | null = $state(null);
+	let audioCtx: AudioContext | null = null;
 	let chunks: Blob[] = [];
 	let selectedMicId = $state("");
 	let recordingSeconds = $state(0);
@@ -130,45 +134,115 @@
 		if (file) handleFile(file);
 	}
 
-	async function toggleMic(): Promise<void> {
-		if (micRecording) {
-			mediaRecorder?.stop();
-			micRecording = false;
-			stopRecordingTimer();
+	function acquireMicStream(): Promise<MediaStream> {
+		const audioConstraints: MediaTrackConstraints = selectedMicId
+			? { deviceId: { exact: selectedMicId } }
+			: true as unknown as MediaTrackConstraints;
+		return navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+	}
+
+	async function acquireDeviceStream(): Promise<MediaStream> {
+		const rawStream = await navigator.mediaDevices.getDisplayMedia({
+			audio: true,
+			video: true  // required by browsers to show picker
+		});
+		const audioTracks = rawStream.getAudioTracks();
+		if (audioTracks.length === 0) {
+			rawStream.getTracks().forEach((t) => t.stop());
+			throw new DOMException('No audio track captured', 'NotAllowedError');
+		}
+		const stream = new MediaStream(audioTracks);
+		rawStream.getVideoTracks().forEach((t) => t.stop());
+		return stream;
+	}
+
+	function stopRecording(): void {
+		if (!isRecording) return;
+		isRecording = false;
+		stopRecordingTimer();
+		mediaRecorder?.stop();
+	}
+
+	async function toggleRecording(): Promise<void> {
+		if (isRecording) {
+			stopRecording();
 			return;
 		}
 
-		try {
-			const audioConstraints: MediaTrackConstraints = selectedMicId
-				? { deviceId: { exact: selectedMicId } }
-				: true as unknown as MediaTrackConstraints;
-			const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
-			chunks = [];
-			const recorder = new MediaRecorder(stream);
-			mediaRecorder = recorder;
+		captureError = '';
+		let micStream: MediaStream | null = null;
+		let deviceStream: MediaStream | null = null;
 
-			recorder.ondataavailable = (e) => {
-				if (e.data.size > 0) chunks.push(e.data);
-			};
-
-			recorder.onstop = () => {
-				stream.getTracks().forEach((t) => t.stop());
-				const blob = new Blob(chunks, { type: 'audio/webm' });
-				const file = new File([blob], 'recording.webm', { type: 'audio/webm' });
-				selectedFile = file;
-				fileDuration = null;
-				validationError = '';
-				onfile(file);
-				chunks = [];
-			};
-
-			recorder.start();
-			micRecording = true;
-			recordingSeconds = 0;
-			recordingTimer = setInterval(() => recordingSeconds++, 1000);
-		} catch {
-			micDenied = true;
+		if (recordSource !== 'device') {
+			try {
+				micStream = await acquireMicStream();
+			} catch {
+				captureError = 'Доступ к микрофону запрещён';
+				return;
+			}
 		}
+		if (recordSource !== 'mic') {
+			try {
+				deviceStream = await acquireDeviceStream();
+			} catch (err) {
+				micStream?.getTracks().forEach((t) => t.stop());
+				captureError = err instanceof DOMException && err.message === 'No audio track captured'
+					? 'Не удалось захватить звук устройства. В диалоге браузера выберите вкладку или экран и включите «Поделиться звуком».'
+					: 'Разрешение на захват звука устройства отклонено';
+				return;
+			}
+		}
+
+		let stream: MediaStream;
+		if (micStream && deviceStream) {
+			audioCtx = new AudioContext();
+			const dest = audioCtx.createMediaStreamDestination();
+			audioCtx.createMediaStreamSource(micStream).connect(dest);
+			audioCtx.createMediaStreamSource(deviceStream).connect(dest);
+			stream = dest.stream;
+		} else {
+			stream = micStream ?? deviceStream!;
+		}
+
+		// Если пользователь снял общий доступ через UI браузера — останавливаем запись
+		deviceStream?.getTracks().forEach((t) => {
+			t.onended = () => stopRecording();
+		});
+
+		let mimeType = 'audio/webm;codecs=opus';
+		if (!MediaRecorder.isTypeSupported(mimeType)) {
+			mimeType = 'audio/webm';
+		}
+
+		chunks = [];
+		const recorder = new MediaRecorder(stream, { mimeType });
+		mediaRecorder = recorder;
+
+		recorder.ondataavailable = (e) => {
+			if (e.data.size > 0) chunks.push(e.data);
+		};
+
+		recorder.onstop = () => {
+			micStream?.getTracks().forEach((t) => t.stop());
+			deviceStream?.getTracks().forEach((t) => {
+				t.onended = null;
+				t.stop();
+			});
+			void audioCtx?.close();
+			audioCtx = null;
+			const blob = new Blob(chunks, { type: 'audio/webm' });
+			const file = new File([blob], 'recording.webm', { type: 'audio/webm' });
+			selectedFile = file;
+			fileDuration = null;
+			validationError = '';
+			onfile(file);
+			chunks = [];
+		};
+
+		recorder.start();
+		isRecording = true;
+		recordingSeconds = 0;
+		recordingTimer = setInterval(() => recordingSeconds++, 1000);
 	}
 
 	function downloadFile(): void {
@@ -257,13 +331,40 @@
 	{/if}
 
 	<div class="mic-row">
-		<MicSelector bind:selectedDeviceId={selectedMicId} disabled={micRecording || micDenied} />
+		<div class="source-select" role="radiogroup" aria-label="Источник записи">
+			<button
+				type="button"
+				class="source-option"
+				class:active={recordSource === 'mic'}
+				aria-pressed={recordSource === 'mic'}
+				onclick={() => (recordSource = 'mic')}
+				disabled={isRecording}
+			>Микрофон</button>
+			<button
+				type="button"
+				class="source-option"
+				class:active={recordSource === 'device'}
+				aria-pressed={recordSource === 'device'}
+				onclick={() => (recordSource = 'device')}
+				disabled={isRecording}
+			>Звук устройства</button>
+			<button
+				type="button"
+				class="source-option"
+				class:active={recordSource === 'mixed'}
+				aria-pressed={recordSource === 'mixed'}
+				onclick={() => (recordSource = 'mixed')}
+				disabled={isRecording}
+			>Микрофон + устройство</button>
+		</div>
+		{#if recordSource !== 'device'}
+			<MicSelector bind:selectedDeviceId={selectedMicId} disabled={isRecording} />
+		{/if}
 		<button
 			class="btn btn-secondary mic-btn"
-			onclick={toggleMic}
-			disabled={micDenied}
+			onclick={toggleRecording}
 		>
-			{#if micRecording}
+			{#if isRecording}
 				<span class="mic-dot recording"></span>
 				Остановить запись
 			{:else}
@@ -273,19 +374,28 @@
 					<line x1="12" y1="19" x2="12" y2="23"/>
 					<line x1="8" y1="23" x2="16" y2="23"/>
 				</svg>
-				Записать с микрофона
+				{#if recordSource === 'mic'}
+					Записать с микрофона
+				{:else if recordSource === 'device'}
+					Записать звук устройства
+				{:else}
+					Записать оба источника
+				{/if}
 			{/if}
 		</button>
-		{#if micRecording}
+		{#if isRecording}
 			<span class="recording-time">
 				<span class="mic-dot recording"></span>
 				{formatRecordingTime(recordingSeconds)}
 			</span>
 		{/if}
-		{#if micDenied}
-			<span class="mic-denied">Доступ к микрофону запрещён</span>
-		{/if}
 	</div>
+	{#if recordSource !== 'mic' && !isRecording}
+		<div class="device-hint">В диалоге браузера выберите вкладку или экран и включите «Поделиться звуком»</div>
+	{/if}
+	{#if captureError}
+		<div class="error-banner">{captureError}</div>
+	{/if}
 </div>
 
 <style>
@@ -432,6 +542,50 @@
 		gap: 0.5rem;
 	}
 
+	.source-select {
+		display: inline-flex;
+		flex-wrap: wrap;
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-sm);
+		overflow: hidden;
+	}
+
+	.source-option {
+		background: var(--color-card);
+		border: none;
+		border-right: 1px solid var(--color-border);
+		padding: 0.45rem 0.85rem;
+		font-size: 0.8125rem;
+		color: var(--color-muted);
+		cursor: pointer;
+		white-space: nowrap;
+		transition: color 0.15s, background-color 0.15s;
+	}
+
+	.source-option:last-child {
+		border-right: none;
+	}
+
+	.source-option:hover:not(:disabled) {
+		color: var(--color-text);
+	}
+
+	.source-option.active {
+		background-color: rgba(33, 160, 56, 0.08);
+		border-color: var(--color-cta);
+		color: var(--color-text);
+	}
+
+	.source-option:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
+	}
+
+	.device-hint {
+		font-size: 0.8125rem;
+		color: var(--color-muted);
+	}
+
 	.mic-dot {
 		width: 8px;
 		height: 8px;
@@ -456,10 +610,5 @@
 	@keyframes pulse-dot {
 		0%, 100% { opacity: 1; }
 		50% { opacity: 0.3; }
-	}
-
-	.mic-denied {
-		font-size: 0.8125rem;
-		color: var(--color-error-text, #D32F2F);
 	}
 </style>
