@@ -544,6 +544,7 @@
 
 	.source-select {
 		display: inline-flex;
+		flex-wrap: wrap;
 		border: 1px solid var(--color-border);
 		border-radius: var(--radius-sm);
 		overflow: hidden;
@@ -557,6 +558,7 @@
 		font-size: 0.8125rem;
 		color: var(--color-muted);
 		cursor: pointer;
+		white-space: nowrap;
 		transition: color 0.15s, background-color 0.15s;
 	}
 
