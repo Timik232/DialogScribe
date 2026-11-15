@@ -13,6 +13,7 @@ pipeline {
         string(name: 'GIT_URL', defaultValue: 'https://github.com/Timik232/DialogScribe.git', description: 'Repository URL or Jenkins-local Git bundle')
         string(name: 'GIT_REF', defaultValue: 'master', description: 'Branch, tag, or commit to verify')
         booleanParam(name: 'RUN_MODEL_TESTS', defaultValue: false, description: 'Dispatch GPU/HuggingFace/model checks to a dedicated labeled executor')
+        booleanParam(name: 'FORCE_NO_CACHE', defaultValue: false, description: 'Rebuild images from scratch regardless of dependency-change detection')
     }
 
     environment {
@@ -51,6 +52,16 @@ pipeline {
                     mkdir -p .ci-artifacts
                     chmod 0777 .ci-artifacts
                     echo "$GIT_REF" > .ci-artifacts/verified-commit.txt
+                    NOCACHE_FLAG=""
+                    if [ "$FORCE_NO_CACHE" = "true" ]; then
+                        NOCACHE_FLAG="--pull --no-cache"
+                    elif ! git rev-parse --verify -q origin/master >/dev/null 2>&1; then
+                        NOCACHE_FLAG="--pull --no-cache"
+                    elif git diff --name-only origin/master...HEAD | grep -qE '^(requirements[^/]*\.txt|ci/Dockerfile\.python|Dockerfile|frontend/package(-lock)?\.json)$'; then
+                        NOCACHE_FLAG="--pull --no-cache"
+                    fi
+                    echo "$NOCACHE_FLAG" > .ci-artifacts/nocache-flag
+                    echo "image build flags: ${NOCACHE_FLAG:---cached}"
                 '''
             }
         }
@@ -69,9 +80,12 @@ pipeline {
             }
         }
 
-        stage('Build clean Python test image') {
+        stage('Build Python test image') {
             steps {
-                sh 'docker build --pull --no-cache -f ci/Dockerfile.python -t "$PYTHON_IMAGE" .'
+                sh '''
+                    NOCACHE_FLAG="$(cat .ci-artifacts/nocache-flag)"
+                    docker build $NOCACHE_FLAG -f ci/Dockerfile.python -t "$PYTHON_IMAGE" .
+                '''
             }
         }
 
@@ -176,7 +190,10 @@ pipeline {
 
         stage('Production Docker build') {
             steps {
-                sh 'docker build --pull --no-cache -t "$APP_IMAGE" .'
+                sh '''
+                    NOCACHE_FLAG="$(cat .ci-artifacts/nocache-flag)"
+                    docker build $NOCACHE_FLAG -t "$APP_IMAGE" .
+                '''
             }
         }
 
