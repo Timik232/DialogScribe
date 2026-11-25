@@ -169,6 +169,8 @@ class TestSecurityHeaders:
         assert "base-uri 'self'" in csp
         assert "connect-src 'self' ws: wss:" in csp
         assert "media-src 'self' blob:" in csp
+        # blob: images are required by the mindmap PNG export (SVG blob -> <img> -> canvas)
+        assert "img-src 'self' data: blob:" in csp
         assert resp.headers["x-content-type-options"] == "nosniff"
 
     def test_client_route_fallback_has_security_headers(self, client, fake_build):
