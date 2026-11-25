@@ -53,7 +53,7 @@ pipeline {
                     chmod 0777 .ci-artifacts
                     echo "$GIT_REF" > .ci-artifacts/verified-commit.txt
                     NOCACHE_FLAG=""
-                    if [ "$FORCE_NO_CACHE" = "true" ]; then
+                    if [ "${FORCE_NO_CACHE:-}" = "true" ]; then
                         NOCACHE_FLAG="--pull --no-cache"
                     elif ! git rev-parse --verify -q origin/master >/dev/null 2>&1; then
                         NOCACHE_FLAG="--pull --no-cache"
