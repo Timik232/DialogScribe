@@ -200,10 +200,12 @@ async def post_chat(
 
 
 # Модели, развёрнутые на собственном инференсе (пометка «локальная» в UI).
-# Список можно переопределить через env, значение по умолчанию — домашний Qwen.
+# Список можно переопределить через env. По умолчанию — стабильный алиас
+# `timur_model` (группа LiteLLM, которую можно переподключить на другой бэкенд
+# одной правкой в LiteLLM, не трогая приложение), а не имя конкретной реализации.
 LOCAL_LLM_MODELS = {
     m.strip()
-    for m in os.getenv("LOCAL_LLM_MODELS", "qwen3.8-27b").split(",")
+    for m in os.getenv("LOCAL_LLM_MODELS", "timur_model").split(",")
     if m.strip()
 }
 
