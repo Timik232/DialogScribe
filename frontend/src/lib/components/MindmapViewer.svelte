@@ -79,10 +79,10 @@
 	}
 
 	// markmap renders node labels as HTML inside <foreignObject>, which taints the
-	// rasterization canvas in Chromium (toBlob → null, the PNG button silently does
-	// nothing) and is not rendered by many SVG consumers. Before any export, build
-	// a portable copy of the live mindmap with native SVG <text> labels, explicit
-	// width/height/viewBox and a background rect.
+	// rasterization canvas in Chromium (toBlob throws SecurityError) and is not
+	// rendered by many SVG consumers. Before any export, build a portable copy of
+	// the live mindmap with native SVG <text> labels, explicit width/height/viewBox
+	// and a background rect.
 	type PortableSvg = { svgString: string; width: number; height: number };
 
 	function buildPortableSvg(): PortableSvg | null {
@@ -237,11 +237,21 @@
 			}
 			ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 			URL.revokeObjectURL(url);
-			canvas.toBlob((blob) => {
-				if (blob) downloadBlob(blob, 'mindmap.png');
-			}, 'image/png');
+			try {
+				canvas.toBlob((blob) => {
+					if (blob) downloadBlob(blob, 'mindmap.png');
+					else console.error('[MindmapViewer] PNG export: canvas.toBlob returned no blob');
+				}, 'image/png');
+			} catch (err) {
+				console.error('[MindmapViewer] PNG export: canvas is tainted, cannot encode PNG', err);
+			}
 		};
-		img.onerror = () => URL.revokeObjectURL(url);
+		// A CSP without `blob:` in img-src blocks this load (img.onerror fires, no
+		// download) — log it instead of failing silently.
+		img.onerror = () => {
+			URL.revokeObjectURL(url);
+			console.error('[MindmapViewer] PNG export: SVG image failed to load (check CSP img-src allows blob:)');
+		};
 		img.src = url;
 	}
 

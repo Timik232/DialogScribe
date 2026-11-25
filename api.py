@@ -96,7 +96,10 @@ install_correlation_logging()
 
 # Defense-in-depth browser hardening for every response (SPA included):
 # scripts/styles/images/media only from same origin (plus blob: media for
-# upload audio previews), no plugins/frames, and no content-type sniffing.
+# upload audio previews and blob: images for client-side rasterization — the
+# mindmap PNG export draws an SVG blob into an <img> and then a canvas; without
+# `blob:` in img-src that load is blocked and the PNG button fails silently),
+# no plugins/frames, and no content-type sniffing.
 # WebSocket upgrades are allowed for the live APIs.
 # SvelteKit pages embed inline bootstrap scripts (theme init + `__sveltekit_*`
 # config), so script-src additionally allows their build-time sha256 hashes
@@ -105,7 +108,7 @@ _CSP_TEMPLATE = (
     "default-src 'self'; "
     "script-src {script_sources}; "
     "style-src 'self' 'unsafe-inline'; "
-    "img-src 'self' data:; "
+    "img-src 'self' data: blob:; "
     "media-src 'self' blob:; "
     "connect-src 'self' ws: wss:; "
     "object-src 'none'; "
