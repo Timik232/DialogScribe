@@ -57,7 +57,7 @@ pipeline {
                         NOCACHE_FLAG="--pull --no-cache"
                     elif ! git rev-parse --verify -q origin/master >/dev/null 2>&1; then
                         NOCACHE_FLAG="--pull --no-cache"
-                    elif git diff --name-only origin/master...HEAD | grep -qE '^(requirements[^/]*\.txt|ci/Dockerfile\.python|Dockerfile|frontend/package(-lock)?\.json)$'; then
+                    elif git diff --name-only origin/master...HEAD | grep -qE '^(requirements[^/]*[.]txt|ci/Dockerfile[.]python|Dockerfile|frontend/package(-lock)?[.]json)$'; then
                         NOCACHE_FLAG="--pull --no-cache"
                     fi
                     echo "$NOCACHE_FLAG" > .ci-artifacts/nocache-flag
