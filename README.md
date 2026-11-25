@@ -147,6 +147,7 @@ HOME=/tmp PYTHONUSERBASE=$HOME/.local JWT_SECRET=ci-test-only python -m pytest -
 | `LLM_BASE_URL` | URL OpenAI-совместимого API | `https://api.openai.com/v1` |
 | `LLM_MODEL` | Модель LLM по умолчанию | `gpt-4.1` |
 | `LLM_MODELS` | Список доступных моделей (через запятую) | `gpt-4.1,gpt-4o-mini` |
+| `LOCAL_LLM_MODELS` | Модели на собственном инференсе — пометка «(локальная)» в списке моделей UI (через запятую). Дефолт — стабильный алиас `timur_model`, а не имя конкретного бэкенда | `timur_model` |
 | `LLM_API_KEY` | Ключ API для LLM | — |
 | `API_KEY` | Bearer-токен для API-авторизации | — |
 | `MAX_UPLOAD_SIZE_MB` | Макс. размер загрузки (МБ) | `2048` |
