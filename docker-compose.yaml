@@ -24,7 +24,7 @@ services:
       start_period: 10s
 
   dialogscribe-web:
-    image: 192.168.1.47:7002/dialogscribe@sha256:576de6a4ee4a2a0240a6da124ec8ae7867b8b94fb18297c8c90c4461f1c2963c
+    image: 192.168.1.47:7002/dialogscribe@sha256:ed2b344a375ac236685fa9095b38a46e8c3e4f72e649a9bc0dd5832430d26095
     build:
       context: .
       dockerfile: Dockerfile
